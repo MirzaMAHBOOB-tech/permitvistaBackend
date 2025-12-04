@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PermitVista Official Certificate</title>
+
+  <!-- Keep print rules in the style block -->
+  <style>
+    @page {
+      size: 10.5in 13in;
+      margin: 0.1in 0.1in 0.3in 0.1in;
+    }
+    @media print {
+      body { background-color: white; margin: 0; }
+      .certificate-footer {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        width: 100%;
+        margin: 0;
+        padding: 0;
+        background-color: white;
+        box-sizing: border-box;
+        border-top: 1px solid #d1d5db;
+        z-index: 1000;
+      }
+      .certificate-footer p {
+        padding: 3px 0.3in;
+        margin: 0;
+        font-size: 0.65rem;
+        color: #4b5563;
+        border-top: none;
+      }
+    }
+  </style>
+</head>
+<body style="font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, 'Noto Sans', sans-serif; color:#1f2937; margin:0; padding:0; background:#fff;">
+
+  <!-- Outer container -->
+  <div style="max-width:9.5in; width:100%; margin:0 auto;  box-sizing:border-box; background:#fff;">
+
+    <!-- HEADER -->
+    <table role="presentation" style="width:100%; border-collapse:collapse; margin-bottom:10px;">
+      <tr>
+        <!-- Logo (left) -->
+        <td style="width:115px; vertical-align:middle; padding-right:16px;">
+          <div style="width:115px; height:115px; display:block;">
+            <img src="{{ logo_image_url }}" alt="Permit Logo"
+                 onerror="this.src='https://placehold.co/86x86/ffd700/8b4513?text=LOGO'"
+                 style="width:115px; height:115px; object-fit:cover; display:block; border-radius:50%;">
+          </div>
+        </td>
+
+        <!-- Title (center-left) -->
+        <td style="vertical-align:middle; text-align:left; padding-right:12px;">
+          <div style="line-height:1;">
+            <div style="font-size:44px; font-weight:900; letter-spacing:-0.02em; color:#0f1724;  font-family: 'Segoe UI', Roboto, Arial, sans-serif; margin-bottom: -4px; ">
+              PermitVista Official<br> Certificate
+            </div>
+            <div style="font-size:22px; color:#374151; margin-top:4px; line-height: 1.7; font-weight: 550;">Certificate No.  {{ permit.certificate_number }}</div>
+          </div>
+        </td>
+
+        <!-- Generated on (right) -->
+        <td style="vertical-align:top; width:160px; text-align:right;">
+          <div style="font-size:21px; color:#4b5563; font-weight:600; margin-top:2px; margin-bottom: -4px; padding-bottom: -4px;">
+            Generated On:<br/>
+            <span style="display:block; margin-top: -8px; font-size:21px; font-weight:700; color:#0b1220;">{{ generated_on_date }}</span>
+          </div>
+        </td>
+      </tr>
+    </table>
+
+    <!-- Thin divider -->
+    <div style="border-top:1px solid #c7cdd3; margin:15px 0 14px;"></div>
+
+    <!-- MAIN COLUMNS -->
+    <div style="width:100%; box-sizing:border-box; margin-top: 15px;">
+
+      <!-- LEFT COLUMN ~65% -->
+      <div style="float:left; width:64%; margin-right:1%; box-sizing:border-box;">
+
+        <!-- PROPERTY INFORMATION -->
+        <table role="presentation" style="width:100%; border-collapse:collapse; border:1px solid #4b5563; margin-bottom:14px;">
+          <thead>
+            <tr>
+              <th colspan="2" style="background:#4b5563; color:#fff; text-align:left; padding:10px 12px; font-size:18px; font-weight:700; letter-spacing:0.02em;">PROPERTY INFORMATION</th>
+            </tr>
+          </thead>
+          <tbody style="background:#fff;">
+            <!-- rows -->
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="width:36%; background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px; color:#111827;">Address Description</td>
+              <td style="padding:6px 10px; font-size:14px; color:#0b1220;">{{ property.address_description }}</td>
+            </tr>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">Property Address</td>
+              <td style="padding:6px 10px; font-size:14px; font-weight:500;">{{ property.address }}</td>
+            </tr>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">City</td>
+              <td style="padding:6px 10px; font-size:14px;">{{ property.city }}</td>
+            </tr>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">State</td>
+              <td style="padding:6px 10px; font-size:14px;">{{ property.state }}</td>
+            </tr>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">ZIP Code</td>
+              <td style="padding:6px 10px; font-size:14px;">{{ property.zip_code }}</td>
+            </tr>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">PIN</td>
+              <td style="padding:6px 10px; font-size:14px; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;">{{ property.pin }}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- PERMIT DETAILS -->
+        <table role="presentation" style="width:100%; border-collapse:collapse; border:1px solid #4b5563; margin-bottom:14px;">
+          <thead>
+            <tr>
+              <th colspan="2" style="background:#4b5563; color:#fff; text-align:left; padding:10px 12px; font-size:18px; font-weight:700;">PERMIT DETAILS</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="width:36%; background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">Permit Class</td>
+              <td style="padding:6px 10px; font-size:14px;">{{ permit.class }}</td>
+            </tr>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">Permit Classification</td>
+              <td style="padding:6px 10px; font-size:14px;">{{ permit.classification }}</td>
+            </tr>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">Permit Number</td>
+              <td style="padding:6px 10px; font-size:14px; font-weight:600;">{{ permit.number }}</td>
+            </tr>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">Permit Type</td>
+              <td style="padding:6px 10px; font-size:14px;">{{ permit.type }}</td>
+            </tr>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">Type Classification</td>
+              <td style="padding:6px 10px; font-size:14px;">{{ permit.type_classification }}</td>
+            </tr>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">Permit ID</td>
+              <td style="padding:6px 10px; font-size:14px;">{{ permit.id }}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- IMPORTANT DATES -->
+        <table role="presentation" style="width:100%; border-collapse:collapse; border:1px solid #4b5563; margin-bottom:18px;">
+          <thead>
+            <tr>
+              <th colspan="2" style="background:#4b5563; color:#fff; text-align:left; padding:10px 12px; font-size:18px; font-weight:700;">IMPORTANT DATES</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="width:36%; background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">Application Date</td>
+              <td style="padding:6px 10px; font-size:14px;">{{ dates.application }}</td>
+            </tr>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">Completion Date</td>
+              <td style="padding:6px 10px; font-size:14px;">{{ dates.completion }}</td>
+            </tr>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">Expires Date</td>
+              <td style="padding:6px 10px; font-size:14px;">{{ dates.expires }}</td>
+            </tr>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">Last Updated</td>
+              <td style="padding:6px 10px; font-size:14px;">{{ dates.last_updated }}</td>
+            </tr>
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">Status Date</td>
+              <td style="padding:6px 10px; font-size:14px;">{{ dates.status_date }}</td>
+            </tr>
+          </tbody>
+        </table>
+
+      </div> <!-- /left column -->
+
+      <!-- RIGHT COLUMN ~34% -->
+      <div style="float:right; width:33%; box-sizing:border-box;">
+
+        <!-- Map (square-ish) -->
+        <div style="width:100%; margin-bottom:20px;">
+          <div style="border:1px solid #9ca3af; box-shadow:0 1px 1px rgba(0,0,0,0.06); overflow:hidden;">
+            <img src="{{ map_image_url }}" alt="Property Map"
+                 onerror="this.src='https://placehold.co/260x200/e5e7eb/6b7280?text=MAP+NOT+AVAILABLE'"
+                 style="display:block; width:100%; height:270px; object-fit:cover;">
+          </div>
+        </div>
+
+        <!-- STATUS & PROCESSING -->
+        <table role="presentation" style="width:100%; border-collapse:collapse; border:1px solid #4b5563; margin-bottom:20px;">
+          <thead>
+            <tr>
+              <th colspan="2" style="background:#4b5563; color:#fff; text-align:left; padding:10px 12px; font-size:18px; font-weight:700;">STATUS & PROCESSING</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #4b5563;">
+              <td style="width:50%; background:#f7fafc;border-right:1px solid #4b5563; padding:10px 10px; font-weight:600; font-size:14px;">Status Current</td>
+              <td style="padding:10px 10px; font-size:14px;">{{ status_current }}</td>
+            </tr>
+            <tr>
+              <td style="background:#f7fafc; border-right:1px solid #4b5563; padding:10px 10px; font-weight:600; font-size:14px;">Current Status</td>
+              <td style="padding:10px 10px; font-size:14px;">{{ current_status }}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- OTHER INFORMATION -->
+        <table role="presentation" style="width:100%; border-collapse:collapse; border:1px solid #4b5563;">
+          <thead>
+            <tr>
+              <th colspan="2" style="background:#4b5563; color:#fff; text-align:left; padding:10px 12px; font-size:18px; font-weight:700;">OTHER INFORMATION</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #e6e9ec;">
+              <td style="width:50%; background:#f7fafc; border-right:1px solid #4b5563; padding:10px 10px; font-weight:600; font-size:14px;">Online Record</td>
+              <td style="padding:10px 10px; font-size:14px;"><a href="{{ other.online_record_url }}" style="color:#2563eb; text-decoration:underline;" target="_blank">Click here</a></td>
+            </tr>
+            <tr>
+              <td style="background:#f7fafc; border-right:1px solid #4b5563; padding:10px 10px; font-weight:600; font-size:14px;">Publisher</td>
+              <td style="padding:10px 10px; font-size:14px;">{{ other.publisher }}</td>
+            </tr>
+          </tbody>
+        </table>
+
+      </div> <!-- /right column -->
+
+      <div style="clear:both;"></div>
+
+      <!-- WORK DESCRIPTION (full width) -->
+      <div style="margin-top:14px;">
+        <table role="presentation" style="width:100%; border-collapse:collapse; border:1px solid #4b5563; margin-bottom:14px;">
+          <thead>
+            <tr>
+              <th style="background:#374151; color:#fff; text-align:left; padding:10px 12px; font-size:18px; font-weight:700;">WORK DESCRIPTION</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding:14px; color:#374151; font-size:18px; font-weight:580;line-height:1.5;">
+                DEMOLITION and replacement of necessary slab (approx. 30 SF) to replace existing cast iron sewer lines under the slab for kitchen and bathroom fixtures (sink, toilet, tub). Extend the new Schedual 40 PVC sanitary system to the city sewer connection in front of the home. This includes replacing the existing cast iron tub with a new teel tub. Post-inspection steps include backfill, compacting, termite treatment, slab prep (visqueen/wire), and concrete pour. All work complies with 2020 FBC, 7th Edition.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+    </div> <!-- /columns wrapper -->
+
+    <!-- small spacer then footer -->
+    <div style="height:8px;"></div>
+
+    <!-- FOOTER (screen + print fixed) -->
+    <div class="certificate-footer" style="width:100%; max-width:8.5in; margin-top: 60px; box-sizing:border-box; padding:0 0.2in; font-size:0.75rem; color:#6b7280;">
+      <p style="border-top:1px solid #e6e9ec; padding-top:10px; margin:0; text-align:center;">
+        This is a digital certificate bearing the authority of the City of Tampa. Powered by PermitVista Certificate System.
+      </p>
+    </div>
+
+  </div> <!-- /outer container -->
+
+</body>
+</html>

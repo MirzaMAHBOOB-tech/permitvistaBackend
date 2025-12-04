@@ -1,0 +1,9 @@
+jinja2
+WeasyPrint
+python-dotenv
+uvicorn
+fastapi
+pandas
+python-slugify
+azure-storage-blob
+python-multipart

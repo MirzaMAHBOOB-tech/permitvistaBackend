@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>Loading—Permit Certificate</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;background:#f6f7fb;color:#0b1220;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}
+    .card{background:#fff;border-radius:10px;box-shadow:0 8px 30px rgba(2,6,23,0.08);padding:24px;max-width:520px;width:90%;text-align:center;}
+    .spinner{width:48px;height:48px;border-radius:50%;border:5px solid #e6e9ef;border-top-color:#20334e;margin:12px auto;animation:spin 1s linear infinite;}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .msg{font-size:15px;font-weight:600;margin-top:8px}
+    .sub{font-size:13px;color:#6b7280;margin-top:6px}
+    .error{color:#b91c1c;margin-top:14px;font-weight:700;}
+    .close{display:inline-block;margin-top:12px;background:#20334e;color:#fff;padding:8px 14px;border-radius:8px;text-decoration:none;}
+  </style>
+</head>
+<body>
+  <div class="card" id="card">
+    <div class="spinner" id="spinner"></div>
+    <div class="msg" id="msg">Preparing certificate...</div>
+    <div class="sub" id="sub">Please wait while we search official records and generate your PDF.</div>
+    <div id="error" style="display:none;">
+      <div class="error">Record not found or PDF generation failed.</div>
+      <a class="close" href="#" onclick="window.close();return false;">Close</a>
+    </div>
+    <script>
+      // Expose a function so opener window can update this page
+      window.__permitLoading = {
+        success: function(){ document.getElementById('msg').textContent = "Opening certificate..."; document.getElementById('spinner').style.display='none'; },
+        notFound: function(){ document.getElementById('msg').textContent = "Record not found"; document.getElementById('spinner').style.display='none'; document.getElementById('error').style.display='block'; },
+        fail: function(msg){ document.getElementById('msg').textContent = "Error"; document.getElementById('sub').textContent = msg || ""; document.getElementById('spinner').style.display='none'; document.getElementById('error').style.display='block'; }
+      };
+    </script>
+  </div>
+</body>
+</html>

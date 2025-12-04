@@ -1,0 +1,17 @@
+cd D:\Tasks\permit-certs-project\permitvistabackend
+
+# 1) Create a .gitignore (prevents venv/logs/secrets)
+@'
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+logs/
+outputs/
+*.log
+.DS_Store
+.vscode/
+'@ | Out-File -Encoding utf8 .gitignore
+

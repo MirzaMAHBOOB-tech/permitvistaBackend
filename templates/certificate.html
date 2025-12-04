@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PermitVista Official Certificate</title>
+    <style>
+        body {
+            font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+            color: #333;
+            line-height: 1.4;
+            margin: 0;
+            padding: 0;
+            background-color: white; 
+        }
+
+        /* Styles for Print/PDF generation (A4 or US Letter) */
+        @page {
+            size: 8.5in 11in; /* US Letter, common for official documents */
+            margin: 0.5in 0.5in 0.8in 0.5in; 
+        }
+        
+        .document-container {
+            max-width: 8.5in;
+            width: 100%;
+            margin: 0 auto; 
+            padding: 0.5in 0.5in 0.5in 0.5in; 
+            box-sizing: border-box;
+            background-color: white;
+            padding-bottom: 3rem; 
+        }
+
+        /* --- HEADER STYLES --- */
+        .header-table {
+            width: 100%;
+            table-layout: fixed;
+            border-collapse: collapse;
+            margin-bottom: 1rem;
+        }
+        .header-table td {
+            vertical-align: top;
+            padding-right: 20px; 
+            line-height: 1; 
+        }
+
+        /* Column 1: Logo */
+        .logo-cell {
+            width: 5rem; 
+            padding-right: 2.5rem;
+        }
+        .logo-container {
+            width: 5.7rem; 
+            height: auto; 
+        }
+        .logo-cell img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        /* Column 2: Title Block */
+        .title-block-cell {
+            text-align: left;
+        }
+        .header-title {
+            font-size: 2.2rem;
+            font-weight: 700;
+            line-height: 1;
+            color: #1f2937;
+            letter-spacing: -0.025em;
+            margin: 0; 
+            padding-bottom: 2px; 
+        }
+        .title-block h2 {
+            font-size: 1.25rem;
+            font-weight: 300;
+            letter-spacing: 0.025em;
+            margin: 0; 
+        }
+
+        /* Column 3: Date Info */
+        .date-cell {
+            width: 8rem; 
+            text-align: right;
+        }
+        .date-info {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #4b5563;
+        }
+        .date-info span {
+            font-weight: 600;
+            color: #1f2937;
+        }
+
+        .header-divider {
+            border-top: 1px solid #d1d5db;
+            margin-bottom: 1rem;
+        }
+        
+        /* --- COLUMN LAYOUT TABLES --- */
+        .column-65-table {
+            width: 65%;
+            float: left; /* Use float to create columns */
+            margin-right: 1rem; /* Gap between columns */
+            border-collapse: collapse;
+        }
+
+        .column-35-table {
+            /* CRITICAL FIX: Calculate the width to account for the 1rem margin on the first table. 
+               This ensures the two columns fit side-by-side without wrapping prematurely. */
+            width: calc(35% - 1rem); 
+            float: left; /* Use float to create columns */
+            border-collapse: collapse;
+        }
+        
+        .section-block-table {
+            width: 100%;
+            margin-bottom: 1rem;
+            border-collapse: collapse;
+        }
+        
+        /* Forces content below the floats */
+        .full-width-clear {
+            clear: both;
+        }
+
+        .section-break-avoid {
+            page-break-inside: avoid;
+        }
+
+        .section-header {
+            background-color: #4b5563;
+            color: white;
+            font-weight: 700;
+            padding: 6px 10px;
+            font-size: 0.95rem;
+            text-transform: uppercase;
+            line-height: 1.2;
+        }
+
+        /* --- DETAIL TABLE STYLING --- */
+        .detail-table-container {
+            border: 1px solid #4b5563;
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+        }
+        .detail-table-container tr {
+            font-size: 0.8rem;
+            border-top: 1px solid #e5e5e5;
+        }
+        .detail-table-container tr:first-child {
+            border-top: none;
+        }
+        .detail-table-container .detail-label {
+            width: 35%;
+            font-weight: 600;
+            background-color: #f8f8f8;
+            padding: 4px 10px;
+            text-align: left;
+            vertical-align: top;
+            word-break: break-word;
+        }
+        .detail-table-container .detail-value {
+            width: 65%;
+            padding: 4px 10px;
+            border-left: 1px solid #e5e5e5;
+            text-align: left;
+            vertical-align: top;
+            word-break: break-word;
+        }
+        .detail-table-container .font-medium {
+            font-weight: 500;
+        }
+        .detail-table-container .font-mono {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        }
+        .detail-table-container .break-all {
+            word-break: break-all;
+        }
+
+        /* --- STATUS TABLE STYLING --- */
+        .status-table-container {
+            border: 1px solid #4b5563;
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+        }
+        .status-table-container tr {
+            font-size: 0.8rem;
+            border-bottom: 1px solid #4b5563;
+        }
+        .status-table-container tr:last-child {
+            border-bottom: none;
+        }
+        .status-table-container .status-label {
+            width: 50%;
+            padding: 8px 10px;
+            background-color: #f7f7f7;
+            font-weight: 600;
+            border-right: 1px solid #4b5563;
+            text-align: left;
+            vertical-align: top;
+            word-break: break-word;
+        }
+        .status-table-container .status-value {
+            width: 50%;
+            padding: 8px 10px;
+            background-color: white;
+            text-align: left;
+            vertical-align: top;
+            word-break: break-word;
+        }
+        .status-table-container .text-blue-600 {
+            color: #2563eb;
+        }
+        .status-table-container .underline {
+            text-decoration: underline;
+        }
+
+        /* --- WORK DESCRIPTION / MAP STYLES --- */
+        .work-desc-header {
+            background-color: #374151;
+            margin-bottom: -1px;
+        }
+        .work-desc-content-table { /* New table for description content */
+            border: 1px solid #9ca3af;
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .work-desc-content-table td {
+            padding: 0.75rem;
+            min-height: 8rem;
+            color: #374151;
+            font-size: 0.875rem;
+            line-height: 1.625;
+            vertical-align: top;
+        }
+        .text-block-avoid {
+            page-break-inside: avoid;
+        }
+
+        /* Map Placeholder Table */
+        .map-placeholder-table {
+            position: relative;
+            width: 100%;
+            /* Border and shadow moved to the table itself */
+            border: 1px solid #9ca3af; 
+            margin-bottom: 1rem; 
+            box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05); 
+            border-collapse: collapse;
+        }
+        .map-placeholder-td {
+            padding: 0;
+            height: 0; /* Important for ratio trick */
+            padding-bottom: 100%; /* Creates square aspect ratio for the cell content */
+            position: relative;
+        }
+        .map-placeholder-td img {
+            position: absolute;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        
+        /* --- FOOTER (Screen View) --- */
+        .certificate-footer {
+            width: 100%; 
+            max-width: 8.5in; 
+            margin: 20px auto 0 auto; /* Adjusted margin for cleaner separation */
+            box-sizing: border-box;
+            /* Remove top padding, only keep horizontal padding (0.5in) for alignment */
+            padding: 0 0.5in; 
+            font-size: 0.75rem;
+            color: #4b5563;
+            /* REMOVED border-top from this element so it doesn't span full width */
+        }
+        
+        /* Apply border to the inner paragraph for a width constrained by the side padding */
+        .certificate-footer p {
+            border-top: 1px solid #d1d5db; 
+            /* Add gap between border and text */
+            padding-top: 10px; 
+            /* Add space below text before the edge of the screen */
+            padding-bottom: 5px; 
+            margin: 0; 
+            text-align: center;
+        }
+
+
+        /* --- PRINT/PDF OPTIMIZATION (CRITICAL) --- */
+        @media print {
+            body { 
+                background-color: white; 
+                margin: 0;
+            }
+            .document-container {
+                box-shadow: none;
+                border: none;
+                margin: 0;
+                width: 100%;
+                padding: 0; 
+            }
+
+            /* Print CSS for Page Breaking */
+            .section-break-avoid {
+                orphans: 3;
+                widows: 3;
+                page-break-inside: avoid;
+            }
+            .text-block-avoid {
+                orphans: 3;
+                widows: 3;
+                page-break-inside: avoid;
+            }
+
+            /* Force the new layout tables to stack on print */
+            .column-65-table, .column-35-table {
+                width: 100% !important;
+                float: none !important; /* Remove float */
+                margin-right: 0 !important;
+                margin-bottom: 1rem; /* Add space between stacked blocks */
+            }
+            
+            /* 2. FIXED FOOTER FOR EVERY PAGE */
+            .certificate-footer {
+                position: fixed;
+                bottom: 0;
+                left: 0;
+                right: 0;
+                width: 100%;
+                margin: 0;
+                padding: 0;
+                background-color: white;
+                box-sizing: border-box;
+                /* Keep the border here for the full print page width fixed footer */
+                border-top: 1px solid #d1d5db; 
+                z-index: 1000;
+            }
+            /* The p element inside the print fixed footer provides the internal padding */
+            .certificate-footer p {
+                padding: 5px 0.5in; 
+                margin: 0;
+                font-size: 0.75rem;
+                color: #4b5563;
+                /* Reset properties applied for screen view, if needed */
+                border-top: none; /* Crucial: Prevent double border in print view */
+                padding-top: 5px; 
+                padding-bottom: 5px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Document Container (Outer div for centering and max-width) -->
+    <div class="document-container">
+
+        <!-- HEADER SECTION (Table-based) -->
+        <table class="header-table section-break-avoid">
+            <tr>
+                <!-- 1. Logo Cell -->
+                <td class="logo-cell">
+                    <div class="logo-container">
+                        <img src="./Medias/badge.png" onerror="this.src='https://placehold.co/80x80/ffd700/8b4513?text=PERMIT+LOGO+ERROR'" alt="Permit Logo">
+                    </div>
+                </td>
+                
+                <!-- 2. Title Block Cell -->
+                <td class="title-block-cell">
+                    <div class="title-block">
+                        <h1 class="header-title">PermitVista Official <br>Certificate</h1>
+                        <h2>Certificate No. 11384</h2>
+                    </div>
+                </td>
+
+                <!-- 3. Generated On Date Cell -->
+                <td class="date-cell">
+                    <div class="date-info">
+                        Generated On: <span>09/29/2025</span>
+                    </div>
+                </td>
+            </tr>
+        </table>
+        <!-- END HEADER SECTION -->
+
+        <hr class="header-divider section-break-avoid" />
+
+        <!-- LEFT COLUMN (65% width on screen, 100% on print) -->
+        <table class="column-65-table section-break-avoid">
+            <tr>
+                <td style="vertical-align: top;">
+                    <!-- 1. PROPERTY INFORMATION SECTION -->
+                    <table class="section-block-table">
+                        <tr>
+                            <td>
+                                <div class="section-header">Property Information</div>
+                                <table class="detail-table-container">
+                                    <tr>
+                                        <td class="detail-label">Address Description</td>
+                                        <td class="detail-value">001100</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="detail-label">Property Address</td>
+                                        <td class="detail-value font-medium">3402 Ellicott St W</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="detail-label">City</td>
+                                        <td class="detail-value">Tampa</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="detail-label">State</td>
+                                        <td class="detail-value">FL</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="detail-label">ZIP Code</td>
+                                        <td class="detail-value">33614</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="detail-label">PIN</td>
+                                        <td class="detail-value font-mono break-all">1829033I6000001000010A</td>
+                                    </tr>
+                                </table>
+                            </td>
+                        </tr>
+                    </table>
+                    <!-- END PROPERTY INFORMATION SECTION -->
+
+                    <!-- 2. PERMIT DETAILS SECTION -->
+                    <table class="section-block-table">
+                        <tr>
+                            <td>
+                                <div class="section-header">Permit Details</div>
+                                <table class="detail-table-container">
+                                    <tr>
+                                        <td class="detail-label">Permit Class</td>
+                                        <td class="detail-value">Residential</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="detail-label">Permit Classification</td>
+                                        <td class="detail-value">Residential</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="detail-label">Permit Number</td>
+                                        <td class="detail-value font-medium">BLD-23-0498191</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="detail-label">Permit Type</td>
+                                        <td class="detail-value">Residential Miscellaneous Permit</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="detail-label">Type Classification</td>
+                                        <td class="detail-value">Other</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="detail-label">Permit ID</td>
+                                        <td class="detail-value">11384</td>
+                                    </tr>
+                                </table>
+                            </td>
+                        </tr>
+                    </table>
+                    <!-- END PERMIT DETAILS SECTION -->
+
+                    <!-- 3. IMPORTANT DATES SECTION -->
+                    <table class="section-block-table">
+                        <tr>
+                            <td>
+                                <div class="section-header">Important Dates</div>
+                                <table class="detail-table-container">
+                                    <tr>
+                                        <td class="detail-label">Application Date</td>
+                                        <td class="detail-value">January 01, 2023</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="detail-label">Completion Date</td>
+                                        <td class="detail-value">January 03, 2023</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="detail-label">Expires Date</td>
+                                        <td class="detail-value">2023-07-02</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="detail-label">Last Updated</td>
+                                        <td class="detail-value">October 06, 2024</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="detail-label">Status Date</td>
+                                        <td class="detail-value">January 03, 2023</td>
+                                    </tr>
+                                </table>
+                            </td>
+                        </tr>
+                    </table>
+                    <!-- END IMPORTANT DATES SECTION -->
+                </td>
+            </tr>
+        </table>
+        <!-- END LEFT COLUMN -->
+
+        <!-- RIGHT COLUMN (35% width on screen, 100% on print) -->
+        <table class="column-35-table section-break-avoid">
+            <tr>
+                <td style="vertical-align: top;">
+                    <!-- Map Placeholder -->
+                    <table class="map-placeholder-table section-break-avoid">
+                        <tr>
+                            <td class="map-placeholder-td">
+                                <img src="./Medias/map.png"
+                                     alt="Property Aerial Map">
+                            </td>
+                        </tr>
+                    </table>
+                    
+                    <!-- 4. STATUS & PROCESSING SECTION -->
+                    <table class="section-block-table section-break-avoid">
+                        <tr>
+                            <td>
+                                <div class="section-header">Status & Processing</div>
+                                <table class="status-table-container">
+                                    <tr>
+                                        <td class="status-label">Status Current</td>
+                                        <td class="status-value">Withdrawn</td>
+                                    </tr>
+                                    <tr>
+                                        <td class="status-label">Current Status</td>
+                                        <td class="status-value">Cancelled</td>
+                                    </tr>
+                                </table>
+                            </td>
+                        </tr>
+                    </table>
+                    <!-- END STATUS & PROCESSING SECTION -->
+
+                    <!-- 5. OTHER INFORMATION SECTION -->
+                    <table class="section-block-table section-break-avoid">
+                        <tr>
+                            <td>
+                                <div class="section-header">Other Information</div>
+                                <table class="status-table-container">
+                                    <tr>
+                                        <td class="status-label">Online Record</td>
+                                        <td class="status-value">
+                                            <a href="https://aca.tampagov.net/citizenaccess/" class="text-blue-600 underline" target="_blank">Click here</a>
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td class="status-label">Publisher</td>
+                                        <td class="status-value">TAMPA</td>
+                                    </tr>
+                                </table>
+                            </td>
+                        </tr>
+                    </table>
+                    <!-- END OTHER INFORMATION SECTION -->
+                </td>
+            </tr>
+        </table>
+        <!-- END RIGHT COLUMN -->
+        
+        <!-- CLEAR FLOAT: Ensures the next full-width table appears below the floated columns -->
+        <table class="full-width-clear section-block-table section-break-avoid">
+            <tr>
+                <td>
+                    <!-- 6. WORK DESCRIPTION (Now full width in the document flow) -->
+                    <div class="section-header work-desc-header">Work Description</div>
+                    <table class="work-desc-content-table text-block-avoid">
+                        <tr>
+                            <td>
+                                DEMOLITION and replacement of necessary slab (approx. 30 SF) to replace existing cast iron sewer lines under the slab for kitchen and bathroom fixtures (sink, toilet, tub). Extend the new Schedule 40 PVC sanitary system to the City sewer connection in front of the home. This includes replacing the existing cast iron tub with a new steel tub. Post-inspection steps include backfill, compacting, termite treatment, slab prep (visqueen/wire), and concrete pour. All work complies with 2020 FBC, 7th Edition.
+                            </td>
+                        </tr>
+                    </table>
+                    <!-- END WORK DESCRIPTION -->
+                </td>
+            </tr>
+        </table>
+
+    </div>
+    
+    <!-- FOOTER: Remains a div for fixed print positioning, but uses table structure internally if needed for alignment -->
+    <div class="certificate-footer">
+        <p>This is a digital certificate bearing the authority of the City of Tampa. Powered by PermitVista Certificate System. </p>
+    </div>
+</body>
+</html>
