@@ -2,7 +2,7 @@
 FROM python:3.11-slim
 
 # Cache busting - change this to force rebuild
-ARG CACHE_BUST=2
+ARG CACHE_BUST=3
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -23,7 +23,8 @@ RUN apt-get update && \
       libcairo2 \
       libpango-1.0-0 \
       libpangocairo-1.0-0 \
-      libgdk-pixbuf2.0-0 \
+      libgdk-pixbuf-xlib-2.0-0 \
+      libgdk-pixbuf-2.0-0 \
       libglib2.0-0 \
       libgobject-2.0-0 \
       libffi8 \
@@ -32,6 +33,8 @@ RUN apt-get update && \
       python3-cffi \
       pkg-config && \
       echo "Cache bust: ${CACHE_BUST}" && \
+      # Update library cache
+      ldconfig && \
     # Download wkhtmltopdf prebuilt deb (debian11 build usually works on slim images)
     curl -L -o /tmp/wkhtml.deb \
       "https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6-1/wkhtmltox_0.12.6-1.debian11_amd64.deb" && \
