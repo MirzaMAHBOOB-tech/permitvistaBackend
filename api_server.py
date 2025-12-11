@@ -28,6 +28,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logging.getLogger("azure").setLevel(logging.ERROR)
 logging.getLogger("azure.storage").setLevel(logging.ERROR)
 
+# ----------------- Check WeasyPrint availability at startup -----------------
+WEASYPRINT_AVAILABLE = False
+try:
+    from weasyprint import HTML
+    WEASYPRINT_AVAILABLE = True
+    logging.info("WeasyPrint is available and ready")
+except ImportError as e:
+    logging.warning("WeasyPrint import failed at startup: %s - PDF generation will use fallback methods", e)
+except Exception as e:
+    logging.warning("WeasyPrint check failed at startup: %s - PDF generation will use fallback methods", e)
+
 # ----------------- Load environment -----------------
 env_path = BASE_DIR / ".env"
 load_dotenv(env_path)
@@ -728,15 +739,20 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
         template = templates.get_template(tmpl_name)
         rendered_html = template.render(**ctx)
 
-        # Try WeasyPrint
-        try:
-            from weasyprint import HTML
-            base = str(BASE_DIR)
-            HTML(string=rendered_html, base_url=base).write_pdf(pdf_file)
-            logging.info("PDF generated via WeasyPrint at %s", pdf_file)
-            return pdf_file
-        except Exception as we_err:
-            logging.warning("WeasyPrint not available or failed: %s — trying wkhtmltopdf fallback", we_err)
+        # Try WeasyPrint (if available)
+        if WEASYPRINT_AVAILABLE:
+            try:
+                from weasyprint import HTML
+                base = str(BASE_DIR)
+                HTML(string=rendered_html, base_url=base).write_pdf(pdf_file)
+                logging.info("PDF generated via WeasyPrint at %s", pdf_file)
+                return pdf_file
+            except ImportError as we_import_err:
+                logging.warning("WeasyPrint import failed at runtime: %s — trying wkhtmltopdf fallback", we_import_err)
+            except Exception as we_err:
+                logging.error("WeasyPrint runtime error: %s — trying wkhtmltopdf fallback", we_err, exc_info=True)
+        else:
+            logging.info("WeasyPrint not available — using wkhtmltopdf fallback")
 
         # Fallback: wkhtmltopdf
         tmp_html = os.path.join(tmpdir, f"{permit_id}.html")
