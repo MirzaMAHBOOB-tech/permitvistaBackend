@@ -4,7 +4,7 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Install runtime deps, download & install wkhtmltopdf .deb, then clean up
+# Install runtime deps for WeasyPrint and wkhtmltopdf
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates \
@@ -15,7 +15,15 @@ RUN apt-get update && \
       libfontconfig1 \
       libssl3 \
       gnupg \
-      dirmngr && \
+      dirmngr \
+      # WeasyPrint dependencies
+      libcairo2 \
+      libpango-1.0-0 \
+      libpangocairo-1.0-0 \
+      libgdk-pixbuf2.0-0 \
+      libffi-dev \
+      shared-mime-info \
+      python3-cffi && \
     # Download wkhtmltopdf prebuilt deb (debian11 build usually works on slim images)
     curl -L -o /tmp/wkhtml.deb \
       "https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6-1/wkhtmltox_0.12.6-1.debian11_amd64.deb" && \
