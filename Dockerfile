@@ -1,6 +1,9 @@
 # Dockerfile - install wkhtmltopdf via upstream .deb on python:3.11-slim
 FROM python:3.11-slim
 
+# Cache busting - change this to force rebuild
+ARG CACHE_BUST=2
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
@@ -16,16 +19,19 @@ RUN apt-get update && \
       libssl3 \
       gnupg \
       dirmngr \
-      # WeasyPrint dependencies
+      # WeasyPrint dependencies (complete set)
       libcairo2 \
       libpango-1.0-0 \
       libpangocairo-1.0-0 \
       libgdk-pixbuf2.0-0 \
       libglib2.0-0 \
       libgobject-2.0-0 \
+      libffi8 \
       libffi-dev \
       shared-mime-info \
-      python3-cffi && \
+      python3-cffi \
+      pkg-config && \
+      echo "Cache bust: ${CACHE_BUST}" && \
     # Download wkhtmltopdf prebuilt deb (debian11 build usually works on slim images)
     curl -L -o /tmp/wkhtml.deb \
       "https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6-1/wkhtmltox_0.12.6-1.debian11_amd64.deb" && \
