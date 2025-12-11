@@ -1,9 +1,9 @@
 services:
   - type: web
     name: permitvista-backend
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn api_server:app --host 0.0.0.0 --port $PORT
-    # If using Docker, Render will automatically detect and use Dockerfile
-    # If using Python buildpack, aptfile will be used automatically
+    env: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Render will use Dockerfile automatically when env: docker is set
+    # Or if Dockerfile is detected in root, Render will use it automatically
 

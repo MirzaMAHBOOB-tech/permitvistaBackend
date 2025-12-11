@@ -21,6 +21,8 @@ RUN apt-get update && \
       libpango-1.0-0 \
       libpangocairo-1.0-0 \
       libgdk-pixbuf2.0-0 \
+      libglib2.0-0 \
+      libgobject-2.0-0 \
       libffi-dev \
       shared-mime-info \
       python3-cffi && \
