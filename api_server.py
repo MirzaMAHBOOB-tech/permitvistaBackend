@@ -231,6 +231,70 @@ def extract_address_components(input_address: str) -> Tuple[Optional[str], Optio
 
     return street_number, route_norm if route_norm else None, zip_code
 
+def extract_record_address_components(rec: dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Extract (street_number, street_name, zip_code) from a record.
+    Uses OriginalAddress1, AddressDescription, and OriginalZip fields from CSV.
+    Returns normalized values for matching.
+    """
+    # Extract street number from address fields
+    street_number = None
+    addr_fields = ["OriginalAddress1", "AddressDescription", "Address", "OriginalAddress", "StreetAddress", "PropertyAddress"]
+    for field in addr_fields:
+        val = rec.get(field)
+        if val and isinstance(val, str) and val.strip():
+            num_match = NUM_RE.match(str(val).strip())
+            if num_match:
+                street_number = num_match.group(1).strip()
+                break
+    
+    # Extract street name - try AddressDescription first (more standardized format)
+    street_name = None
+    addr_desc = rec.get("AddressDescription") or ""
+    if addr_desc:
+        # Format is usually: "3110 W Chapin Ave (ACA)" or "3613 Lindell Ave (ACA)"
+        # Remove (ACA) tag
+        cleaned = re.sub(r"\s*\(aca\)\s*$", "", addr_desc, flags=re.IGNORECASE).strip()
+        # Remove street number if present
+        if street_number and cleaned.startswith(street_number):
+            cleaned = cleaned[len(street_number):].strip()
+        # Remove direction tokens (N, S, E, W, etc.) - can be at start
+        cleaned = re.sub(r"^\b(N|S|E|W|NE|NW|SE|SW|North|South|East|West)\b\.?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"\b(N|S|E|W|NE|NW|SE|SW|North|South|East|West)\b\.?$", "", cleaned, flags=re.IGNORECASE).strip()
+        # Remove street type
+        cleaned = re.sub(r"\b(Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Lane|Ln|Drive|Dr|Court|Ct|Terrace|Ter|Place|Pl|Way|Wy|Circle|Cir|Trail|Trl|Parkway|Pkwy|Square|Sq)\b\.?$", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = normalize_text(cleaned)
+        if cleaned:
+            street_name = cleaned
+    
+    # If not found in AddressDescription, try OriginalAddress1
+    if not street_name:
+        orig_addr = rec.get("OriginalAddress1") or ""
+        if orig_addr:
+            # Format is usually: "3110 Chapin Ave W " or "3613 Lindell Ave  "
+            cleaned = str(orig_addr).strip()
+            # Remove street number if present
+            if street_number and cleaned.startswith(street_number):
+                cleaned = cleaned[len(street_number):].strip()
+            # Remove direction tokens
+            cleaned = re.sub(r"^\b(N|S|E|W|NE|NW|SE|SW|North|South|East|West)\b\.?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+            cleaned = re.sub(r"\b(N|S|E|W|NE|NW|SE|SW|North|South|East|West)\b\.?$", "", cleaned, flags=re.IGNORECASE).strip()
+            # Remove street type
+            cleaned = re.sub(r"\b(Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Lane|Ln|Drive|Dr|Court|Ct|Terrace|Ter|Place|Pl|Way|Wy|Circle|Cir|Trail|Trl|Parkway|Pkwy|Square|Sq)\b\.?$", "", cleaned, flags=re.IGNORECASE).strip()
+            cleaned = normalize_text(cleaned)
+            if cleaned:
+                street_name = cleaned
+    
+    # Extract zip code
+    zip_code = None
+    zip_val = rec.get("OriginalZip") or rec.get("ZipCode") or rec.get("ZIP") or rec.get("Zip") or ""
+    if zip_val and isinstance(zip_val, str) and zip_val.strip():
+        zip_match = ZIP_RE.search(str(zip_val).strip())
+        if zip_match:
+            zip_code = zip_match.group(1).strip()
+    
+    return street_number, street_name, zip_code
+
 def record_address_values(rec: dict) -> List[str]:
     """
     Collect address-like fields from a record and normalize them for match testing.
@@ -502,80 +566,141 @@ def search(
                     if appl > date_to:
                         continue
 
-                # Build normalized candidate addresses from record
-                rec_addrs = record_address_values(rec)
-                if not rec_addrs:
-                    continue
-
-                # scoring-based match
+                # STRICT FIELD-BASED MATCHING (only when user provides structured fields)
+                user_provided_structured = bool(street_number_q or street_name_q or zip_q)
                 matched = False
                 matched_by = ""
-                input_norm = normalize_text(input_addr)
-                route_tokens = (route_norm or "").split()
-                input_main = main_street_part(input_addr)
+                
+                if user_provided_structured:
+                    # User explicitly provided structured fields - use strict matching
+                    user_street_number = (street_number_q or "").strip() if street_number_q else None
+                    user_street_name = normalize_text(street_name_q or "") if street_name_q else None
+                    user_zip = (zip_q or "").strip() if zip_q else None
+                    
+                    # Extract address components from record
+                    rec_street_number, rec_street_name, rec_zip = extract_record_address_components(rec)
+                    
+                    # Log matching attempt
+                    logging.info("Strict matching | user: num='%s' name='%s' zip='%s' | rec: num='%s' name='%s' zip='%s' | rec_addr='%s'",
+                                 user_street_number, user_street_name, user_zip,
+                                 rec_street_number, rec_street_name, rec_zip,
+                                 rec.get("AddressDescription") or rec.get("OriginalAddress1") or "")
+                    
+                    matched = True
+                    matched_by = "field_match"
+                    
+                    # Check street number (if provided)
+                    if user_street_number:
+                        if not rec_street_number or user_street_number.strip() != rec_street_number.strip():
+                            matched = False
+                            logging.debug("Street number mismatch: user='%s' rec='%s'", user_street_number, rec_street_number)
+                    
+                    # Check street name (if provided)
+                    if matched and user_street_name:
+                        if not rec_street_name:
+                            matched = False
+                        else:
+                            # All user tokens must be present in record
+                            user_tokens = [t for t in user_street_name.split() if t]
+                            rec_tokens = [t for t in rec_street_name.split() if t]
+                            
+                            if len(user_tokens) > 0:
+                                all_found = True
+                                for user_token in user_tokens:
+                                    found = False
+                                    for rec_token in rec_tokens:
+                                        if user_token == rec_token or user_token.startswith(rec_token) or rec_token.startswith(user_token):
+                                            found = True
+                                            break
+                                    if not found:
+                                        all_found = False
+                                        break
+                                
+                                if not all_found:
+                                    matched = False
+                                    logging.debug("Street name mismatch: user='%s' rec='%s'", user_street_name, rec_street_name)
+                    
+                    # Check zip code (if provided)
+                    if matched and user_zip:
+                        user_zip_clean = user_zip.strip()[:5]
+                        if not rec_zip or user_zip_clean != rec_zip.strip()[:5]:
+                            matched = False
+                            logging.debug("Zip mismatch: user='%s' rec='%s'", user_zip_clean, rec_zip)
+                
+                # If strict matching didn't match (or wasn't used), fall back to scoring-based matching
+                if not matched:
+                    # Build normalized candidate addresses from record
+                    rec_addrs = record_address_values(rec)
+                    if not rec_addrs:
+                        continue
 
-                # Prefer exact AddressDescription-style canonical equality if available
-                rec_addrdesc = rec.get("AddressDescription") or ""
-                if rec_addrdesc:
-                    rec_num, rec_tokens = canonicalize_address_main(rec_addrdesc)
-                    if in_num and rec_num and in_num == rec_num and rec_tokens and in_tokens:
-                        if set(rec_tokens) == set(in_tokens):
+                    # scoring-based match
+                    input_norm = normalize_text(input_addr)
+                    route_tokens = (route_norm or "").split()
+                    input_main = main_street_part(input_addr)
+
+                    # Prefer exact AddressDescription-style canonical equality if available
+                    rec_addrdesc = rec.get("AddressDescription") or ""
+                    if rec_addrdesc:
+                        rec_num, rec_tokens = canonicalize_address_main(rec_addrdesc)
+                        if in_num and rec_num and in_num == rec_num and rec_tokens and in_tokens:
+                            if set(rec_tokens) == set(in_tokens):
+                                matched = True
+                                matched_by = "addrdesc_canonical"
+
+                    # helper: count token matches between route tokens and candidate tokens
+                    def token_match_count(tokens, cand_tokens):
+                        c = 0
+                        for t in tokens:
+                            if not t: 
+                                continue
+                            for ct in cand_tokens:
+                                if ct.startswith(t) or ct == t:
+                                    c += 1
+                                    break
+                        return c
+
+                    for cand in rec_addrs:
+                        score = 0
+
+                        # ZIP helps but is not required
+                        if zip_from_google or zip_code:
+                            z = (zip_from_google or zip_code or "").strip()
+                            rec_zip = (rec.get("OriginalZip") or rec.get("ZipCode") or "").strip()
+                            if z and rec_zip and rec_zip.startswith(z):
+                                score += 3
+                            elif z and (cand.endswith(z) or (" " + z + " ") in (" " + cand + " ")):
+                                score += 2
+
+                        # street number alignment helps
+                        if street_number and (cand.startswith(street_number + " ") or cand.startswith(street_number + "-") or cand.startswith(street_number + ",")):
+                            score += 2
+
+                        # route tokens overlap
+                        if route_tokens:
+                            cand_tokens = cand.split()
+                            count = token_match_count(route_tokens, cand_tokens)
+                            required = 1 if len(route_tokens) == 1 else min(2, len(route_tokens))
+                            if count >= required:
+                                score += 2
+
+                        # main-part (before comma) equality/containment
+                        cand_main = main_street_part(cand)
+                        if input_main and cand_main:
+                            if cand_main == input_main:
+                                score += 3
+                            elif cand_main.startswith(input_main) or input_main.startswith(cand_main):
+                                score += 2
+
+                        # substring fallback
+                        if input_norm and input_norm in cand:
+                            score += 1
+
+                        if score >= 3:
                             matched = True
-                            matched_by = "addrdesc_canonical"
-
-                # helper: count token matches between route tokens and candidate tokens
-                def token_match_count(tokens, cand_tokens):
-                    c = 0
-                    for t in tokens:
-                        if not t: 
-                            continue
-                        for ct in cand_tokens:
-                            if ct.startswith(t) or ct == t:
-                                c += 1
-                                break
-                    return c
-
-                for cand in rec_addrs:
-                    score = 0
-
-                    # ZIP helps but is not required
-                    if zip_from_google or zip_code:
-                        z = (zip_from_google or zip_code or "").strip()
-                        rec_zip = (rec.get("OriginalZip") or rec.get("ZipCode") or "").strip()
-                        if z and rec_zip and rec_zip.startswith(z):
-                            score += 3
-                        elif z and (cand.endswith(z) or (" " + z + " ") in (" " + cand + " ")):
-                            score += 2
-
-                    # street number alignment helps
-                    if street_number and (cand.startswith(street_number + " ") or cand.startswith(street_number + "-") or cand.startswith(street_number + ",")):
-                        score += 2
-
-                    # route tokens overlap
-                    if route_tokens:
-                        cand_tokens = cand.split()
-                        count = token_match_count(route_tokens, cand_tokens)
-                        required = 1 if len(route_tokens) == 1 else min(2, len(route_tokens))
-                        if count >= required:
-                            score += 2
-
-                    # main-part (before comma) equality/containment
-                    cand_main = main_street_part(cand)
-                    if input_main and cand_main:
-                        if cand_main == input_main:
-                            score += 3
-                        elif cand_main.startswith(input_main) or input_main.startswith(cand_main):
-                            score += 2
-
-                    # substring fallback
-                    if input_norm and input_norm in cand:
-                        score += 1
-
-                    if score >= 3:
-                        matched = True
-                        if not matched_by:
-                            matched_by = "score"
-                        break
+                            if not matched_by:
+                                matched_by = "score"
+                            break
 
                 if not matched:
                     continue
