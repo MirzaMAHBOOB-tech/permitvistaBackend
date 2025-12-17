@@ -585,35 +585,29 @@ def search(
                         continue
 
                 # STRICT FIELD-BASED MATCHING LOGIC
-                # Determine which fields user provided
-                user_street_number = (street_number_q or "").strip()
-                user_street_name = normalize_text(street_name_q or "") if street_name_q else None
-                user_zip = (zip_q or "").strip()
+                # Only use strict matching if user EXPLICITLY provided structured fields (not extracted from address)
+                user_provided_structured = bool(street_number_q or street_name_q or zip_q)
                 
-                # If no structured fields provided, extract from address string
-                if not user_street_number and street_number:
-                    user_street_number = street_number
-                if not user_street_name and route_norm:
-                    user_street_name = route_norm
-                if not user_zip and zip_code:
-                    user_zip = zip_code
+                # Determine which fields user provided (only from query params, not extracted)
+                user_street_number = (street_number_q or "").strip() if street_number_q else None
+                user_street_name = normalize_text(street_name_q or "") if street_name_q else None
+                user_zip = (zip_q or "").strip() if zip_q else None
                 
                 # Extract address components from record
                 rec_street_number, rec_street_name, rec_zip = extract_record_address_components(rec)
-                
-                # Log matching attempt for debugging (only if structured fields provided)
-                if user_street_number or user_street_name or user_zip:
-                    logging.info("Field-based matching | user: num='%s' name='%s' zip='%s' | rec: num='%s' name='%s' zip='%s' | rec_addr='%s'",
-                                 user_street_number, user_street_name, user_zip,
-                                 rec_street_number, rec_street_name, rec_zip,
-                                 rec.get("AddressDescription") or rec.get("Address") or "")
                 
                 # Match logic: only match fields that user provided, ALL must match exactly
                 matched = False
                 matched_by = ""
                 
-                # If user provided structured fields, use strict matching
-                if user_street_number or user_street_name or user_zip:
+                # If user EXPLICITLY provided structured fields, use strict matching
+                if user_provided_structured and (user_street_number or user_street_name or user_zip):
+                    # Log matching attempt for debugging
+                    logging.info("Field-based matching | user: num='%s' name='%s' zip='%s' | rec: num='%s' name='%s' zip='%s' | rec_addr='%s'",
+                                 user_street_number, user_street_name, user_zip,
+                                 rec_street_number, rec_street_name, rec_zip,
+                                 rec.get("AddressDescription") or rec.get("Address") or "")
+                    
                     matched = True
                     matched_by = "field_match"
                     
@@ -668,8 +662,9 @@ def search(
                                 matched = False
                                 logging.debug("Zip code mismatch: user=%s rec=%s", user_zip_clean, rec_zip_clean)
                 
-                # If no structured fields provided OR strict matching failed, fall back to old logic
-                if not matched and (not user_street_number and not user_street_name and not user_zip):
+                # If user did NOT provide structured fields, fall back to old scoring-based logic
+                # If user DID provide structured fields but matching failed, skip this record (no fallback)
+                if not user_provided_structured:
                     # Build normalized candidate addresses from record
                     rec_addrs = record_address_values(rec)
                     if not rec_addrs:
