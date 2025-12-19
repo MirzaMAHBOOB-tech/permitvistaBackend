@@ -19,6 +19,46 @@ import threading
 import webbrowser
 from typing import Optional, List, Tuple
 import re
+import secrets
+from collections import defaultdict
+from datetime import datetime, timedelta
+
+# ----------------- Token Management for Privacy -----------------
+# Store token -> permit_id mapping (with expiration)
+_token_store: dict[str, dict] = {}  # token -> {"permit_id": str, "expires_at": datetime}
+_token_lock = threading.Lock()
+
+def generate_secure_token() -> str:
+    """Generate a secure random token"""
+    return secrets.token_urlsafe(32)  # 32 bytes = 43 characters URL-safe
+
+def create_token_for_permit(permit_id: str) -> str:
+    """Create a token for a permit_id and store it (expires in 24 hours)"""
+    token = generate_secure_token()
+    expires_at = datetime.now() + timedelta(hours=24)
+    with _token_lock:
+        _token_store[token] = {
+            "permit_id": permit_id,
+            "expires_at": expires_at
+        }
+        # Clean up expired tokens (keep last 1000)
+        if len(_token_store) > 1000:
+            now = datetime.now()
+            expired = [t for t, data in _token_store.items() if data["expires_at"] < now]
+            for t in expired[:500]:  # Remove up to 500 expired tokens
+                _token_store.pop(t, None)
+    return token
+
+def get_permit_id_from_token(token: str) -> Optional[str]:
+    """Get permit_id from token, return None if invalid or expired"""
+    with _token_lock:
+        data = _token_store.get(token)
+        if not data:
+            return None
+        if data["expires_at"] < datetime.now():
+            _token_store.pop(token, None)  # Remove expired token
+            return None
+        return data["permit_id"]
 
 # ----------------- Setup / Logging -----------------
 BASE_DIR = Path(__file__).parent
@@ -717,9 +757,11 @@ def search(
                 rec_id = pick_id_from_record(rec)
                 try:
                     pdf_path = generate_pdf_from_template(rec, str(TEMPLATES_DIR / "certificate-placeholder.html"))
-                    view_url = f"/view/{rec_id}"
-                    download_url = f"/download/{rec_id}.pdf"
-                    logging.info("SEARCH early-return PDF generated | id=%s blob=%s", rec_id, name)
+                    # Use token instead of permit_id in URL for privacy
+                    token = create_token_for_permit(rec_id)
+                    view_url = f"/view/{token}"
+                    download_url = f"/download/{token}.pdf"
+                    logging.info("SEARCH early-return PDF generated | id=%s blob=%s token=%s", rec_id, name, token[:8])
                     dur_ms = int((time.perf_counter() - start_t) * 1000)
                     return JSONResponse({
                         "results": [rec],
@@ -748,6 +790,15 @@ def search(
     except Exception:
         results_sorted = results
 
+    # Add view_url and download_url (with tokens) to all results for privacy
+    for rec in results_sorted:
+        if "view_url" not in rec and "download_url" not in rec:
+            rec_id = pick_id_from_record(rec)
+            if rec_id:
+                token = create_token_for_permit(rec_id)
+                rec["view_url"] = f"/view/{token}"
+                rec["download_url"] = f"/download/{token}.pdf"
+
     dur_ms = int((time.perf_counter() - start_t) * 1000)
     logging.info("SEARCH done | results=%d canonical_hit=%s duration_ms=%d", len(results_sorted), canonical_hit, dur_ms)
     return JSONResponse({"results": results_sorted, "duration_ms": dur_ms, "canonical_hit": canonical_hit})
@@ -770,9 +821,10 @@ def get_record(permit_id: str = Query(...)):
         except Exception as e:
             logging.debug("Ignoring azure lookup error for get_record local-pdf case: %s", e)
             record = None
-        # return minimal JSON so frontend can open view/download
-        view_url = f"/view/{permit_id}"
-        download_url = f"/download/{permit_id}.pdf"
+        # return minimal JSON so frontend can open view/download (use token for privacy)
+        token = create_token_for_permit(permit_id)
+        view_url = f"/view/{token}"
+        download_url = f"/download/{token}.pdf"
         return JSONResponse({"record": record or {"id": permit_id}, "view_url": view_url, "download_url": download_url})
 
     # 2) No local PDF; try to find record in Azure (this is your original behavior)
@@ -806,8 +858,10 @@ def get_record(permit_id: str = Query(...)):
             "download_url": None
         })
 
-    view_url = f"/view/{permit_id_safe}"
-    download_url = f"/download/{permit_id_safe}.pdf"
+    # Use token instead of permit_id in URL for privacy
+    token = create_token_for_permit(permit_id_safe)
+    view_url = f"/view/{token}"
+    download_url = f"/download/{token}.pdf"
     return JSONResponse({"record": record, "view_url": view_url, "download_url": download_url})
 
 # ----------------- PDF generation, view and download endpoints -----------------
@@ -941,9 +995,15 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
         logging.exception("PDF generation failed: %s", e)
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
 
-@app.get("/view/{permit_id}")
-def view_pdf(permit_id: str):
-    logging.info("View request for permit %s", permit_id)
+@app.get("/view/{token}")
+def view_pdf(token: str):
+    # Look up permit_id from token
+    permit_id = get_permit_id_from_token(token)
+    if not permit_id:
+        logging.warning("Invalid or expired token for view request: %s", token[:8])
+        raise HTTPException(status_code=404, detail="Invalid or expired link. Please search again.")
+    
+    logging.info("View request for permit %s (token: %s)", permit_id, token[:8])
 
     # 1) Serve cached file if present (no Azure required)
     local_pdf = get_local_pdf_path_if_exists(permit_id)
@@ -979,10 +1039,16 @@ def view_pdf(permit_id: str):
         headers={"Content-Disposition": f"inline; filename=\"{os.path.basename(pdf_file)}\""}
     )
 
-@app.get("/download/{permit_id}")
-@app.get("/download/{permit_id}.pdf")
-def download_pdf(permit_id: str):
-    logging.info("Download request for permit %s", permit_id)
+@app.get("/download/{token}")
+@app.get("/download/{token}.pdf")
+def download_pdf(token: str):
+    # Look up permit_id from token
+    permit_id = get_permit_id_from_token(token)
+    if not permit_id:
+        logging.warning("Invalid or expired token for download request: %s", token[:8])
+        raise HTTPException(status_code=404, detail="Invalid or expired link. Please search again.")
+    
+    logging.info("Download request for permit %s (token: %s)", permit_id, token[:8])
 
     # 1) Serve cached if present
     local_pdf = get_local_pdf_path_if_exists(permit_id)
