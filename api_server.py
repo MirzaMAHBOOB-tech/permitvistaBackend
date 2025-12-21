@@ -85,8 +85,8 @@ load_dotenv(env_path)
 AZURE_CONN = os.getenv("AZURE_CONN")
 SRC_CONTAINER = os.getenv("SRC_CONTAINER")
 OUTPUT_CONTAINER = os.getenv("OUTPUT_CONTAINER")
-SAMPLE_PERMIT_LIMIT = int(os.getenv("SAMPLE_PERMIT_LIMIT", "5"))
-MAX_CSV_FILES = int(os.getenv("MAX_CSV_FILES", "10"))
+SAMPLE_PERMIT_LIMIT = int(os.getenv("SAMPLE_PERMIT_LIMIT", "1000"))
+MAX_CSV_FILES = int(os.getenv("MAX_CSV_FILES", "100"))
 
 # ----------------- FastAPI app -----------------
 app = FastAPI(title="Permit Certificates", docs_url=None, redoc_url=None)
