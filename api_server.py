@@ -564,7 +564,7 @@ def search(
     start_t = time.perf_counter()
     tries = 0
     seen_ids: set = set()
-    canonical_hit = False
+    canonical_hit = True
 
     try:
         scan_max = min(max(1, int(scan_limit or MAX_CSV_FILES)), 5000)
@@ -612,25 +612,25 @@ def search(
                 matched_by = ""
                 
                 if user_provided_structured:
-                  user_street_number = (street_number_q or "").strip() if street_number_q else None
-                  user_street_name = normalize_text(street_name_q or "") if street_name_q else None
-                  user_zip = (zip_q or "").strip() if zip_q else None
+                    user_street_number = (street_number_q or "").strip() if street_number_q else None
+                    user_street_name = normalize_text(street_name_q or "") if street_name_q else None
+                    user_zip = (zip_q or "").strip() if zip_q else None
 
-                  rec_street_number, rec_street_name, rec_zip = extract_record_address_components(rec)
+                    rec_street_number, rec_street_name, rec_zip = extract_record_address_components(rec)
 
-                  matched = True
-                  matched_by = "field_match"
+                    matched = True
+                    matched_by = "field_match"
 
-                  # 1️⃣ Street number check
-                  if user_street_number:
-                    if not rec_street_number or user_street_number != rec_street_number:
-                      matched = False
+                    # 1️⃣ Street number check
+                    if user_street_number:
+                        if not rec_street_number or user_street_number != rec_street_number:
+                            matched = False
 
-                  # 2️⃣ Street name check
-                  if matched and user_street_name:
-                     if not rec_street_name:
-                         matched = False
-                     else:
+                    # 2️⃣ Street name check
+                    if matched and user_street_name:
+                         if not rec_street_name:
+                            matched = False
+                    else:
                          user_tokens = user_street_name.split()
                          rec_tokens = rec_street_name.split()
 
@@ -639,11 +639,11 @@ def search(
                                  matched = False
                                  break
 
-                  # 3️⃣ ZIP validation (ONLY if user provided zip)
-                  if matched and user_zip:
-                      user_zip_clean = user_zip[:5]
-                      if not rec_zip or user_zip_clean != rec_zip[:5]:
-                          matched = False
+                    # 3️⃣ ZIP validation (ONLY if user provided zip)
+                    if matched and user_zip:
+                        user_zip_clean = user_zip[:5]
+                        if not rec_zip or user_zip_clean != rec_zip[:5]:
+                            matched = False
 
                 # ❌ DO NOT fall back if user provided zip (avoid zip-only matches)
                 if not matched and not (zip_q or zip_from_google):
