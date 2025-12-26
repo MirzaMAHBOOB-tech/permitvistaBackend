@@ -288,17 +288,16 @@ def extract_record_address_components(rec: dict) -> Tuple[Optional[str], Optiona
                 street_number = num_match.group(1).strip()
                 break
     
-    # Extract street name - try AddressDescription first (more standardized format)
+    # Extract street name - try OriginalAddress1 first (more reliable, AddressDescription might be a number)
     street_name = None
-    addr_desc = rec.get("AddressDescription") or ""
-    if addr_desc:
-        # Format is usually: "3110 W Chapin Ave (ACA)" or "3613 Lindell Ave (ACA)"
-        # Remove (ACA) tag
-        cleaned = re.sub(r"\s*\(aca\)\s*$", "", addr_desc, flags=re.IGNORECASE).strip()
+    orig_addr = rec.get("OriginalAddress1") or ""
+    if orig_addr:
+        # Format is usually: "3110 Chapin Ave W " or "3613 Lindell Ave  "
+        cleaned = str(orig_addr).strip()
         # Remove street number if present
         if street_number and cleaned.startswith(street_number):
             cleaned = cleaned[len(street_number):].strip()
-        # Remove direction tokens (N, S, E, W, etc.) - can be at start
+        # Remove direction tokens
         cleaned = re.sub(r"^\b(N|S|E|W|NE|NW|SE|SW|North|South|East|West)\b\.?\s*", "", cleaned, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"\b(N|S|E|W|NE|NW|SE|SW|North|South|East|West)\b\.?$", "", cleaned, flags=re.IGNORECASE).strip()
         # Remove street type
@@ -307,8 +306,27 @@ def extract_record_address_components(rec: dict) -> Tuple[Optional[str], Optiona
         if cleaned:
             street_name = cleaned
     
-    # If not found in AddressDescription, try OriginalAddress1
+    # If not found in OriginalAddress1, try AddressDescription (but skip if it's just a number)
     if not street_name:
+        addr_desc = rec.get("AddressDescription") or ""
+        if addr_desc:
+            addr_desc_str = str(addr_desc).strip()
+            # Skip if it's just a number (like "1110.0" or "1110")
+            if not (addr_desc_str.replace(".", "").replace("-", "").isdigit()):
+                # Format is usually: "3110 W Chapin Ave (ACA)" or "3613 Lindell Ave (ACA)"
+                # Remove (ACA) tag
+                cleaned = re.sub(r"\s*\(aca\)\s*$", "", addr_desc_str, flags=re.IGNORECASE).strip()
+                # Remove street number if present
+                if street_number and cleaned.startswith(street_number):
+                    cleaned = cleaned[len(street_number):].strip()
+                # Remove direction tokens (N, S, E, W, etc.) - can be at start
+                cleaned = re.sub(r"^\b(N|S|E|W|NE|NW|SE|SW|North|South|East|West)\b\.?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+                cleaned = re.sub(r"\b(N|S|E|W|NE|NW|SE|SW|North|South|East|West)\b\.?$", "", cleaned, flags=re.IGNORECASE).strip()
+                # Remove street type
+                cleaned = re.sub(r"\b(Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Lane|Ln|Drive|Dr|Court|Ct|Terrace|Ter|Place|Pl|Way|Wy|Circle|Cir|Trail|Trl|Parkway|Pkwy|Square|Sq)\b\.?$", "", cleaned, flags=re.IGNORECASE).strip()
+                cleaned = normalize_text(cleaned)
+                if cleaned:
+                    street_name = cleaned
         orig_addr = rec.get("OriginalAddress1") or ""
         if orig_addr:
             # Format is usually: "3110 Chapin Ave W " or "3613 Lindell Ave  "
@@ -328,8 +346,13 @@ def extract_record_address_components(rec: dict) -> Tuple[Optional[str], Optiona
     # Extract zip code
     zip_code = None
     zip_val = rec.get("OriginalZip") or rec.get("ZipCode") or rec.get("ZIP") or rec.get("Zip") or ""
-    if zip_val and isinstance(zip_val, str) and zip_val.strip():
-        zip_match = ZIP_RE.search(str(zip_val).strip())
+    if zip_val:
+        # Handle both string and numeric zip codes (e.g., 33603.0)
+        zip_str = str(zip_val).strip()
+        # Remove decimal part if present (e.g., "33603.0" -> "33603")
+        if "." in zip_str and zip_str.replace(".", "").isdigit():
+            zip_str = zip_str.split(".")[0]
+        zip_match = ZIP_RE.search(zip_str)
         if zip_match:
             zip_code = zip_match.group(1).strip()
     
@@ -591,62 +614,62 @@ def search(
             for _, row in df.iterrows():
                 rec = {k.strip(): ("" if pd.isna(v) else str(v)) for k, v in row.items()}
 
-                # City filter (if provided)
+                # City filter (if provided) - OK to check early
                 if city_norm:
                     rec_city = normalize_text(rec.get("OriginalCity") or rec.get("City") or "")
                     if city_norm not in rec_city:
                         continue
 
-                # Date filters (if provided)
-                appl = rec.get("AppliedDate", "")
-                if date_from and appl:
-                    if appl < date_from:
-                        continue
-                if date_to and appl:
-                    if appl > date_to:
-                        continue
-
-                # STRICT FIELD-BASED MATCHING (only when user provides structured fields)
+                # ============================================================
+                # STEP 1: ADDRESS MATCHING (REQUIRED - must match exactly)
+                # ============================================================
                 user_provided_structured = bool(street_number_q or street_name_q or zip_q)
-                matched = False
+                address_matched = False
                 matched_by = ""
                 
                 if user_provided_structured:
+                    # STRICT FIELD-BASED MATCHING: All provided fields must match exactly
                     user_street_number = (street_number_q or "").strip() if street_number_q else None
                     user_street_name = normalize_text(street_name_q or "") if street_name_q else None
                     user_zip = (zip_q or "").strip() if zip_q else None
 
                     rec_street_number, rec_street_name, rec_zip = extract_record_address_components(rec)
 
-                    matched = True
+                    address_matched = True
                     matched_by = "field_match"
 
-                    # 1️⃣ Street number check
+                    # 1️⃣ Street number check (EXACT match required if provided)
                     if user_street_number:
                         if not rec_street_number or user_street_number != rec_street_number:
-                            matched = False
+                            address_matched = False
+                            logging.debug(f"Street number mismatch: user='{user_street_number}' vs rec='{rec_street_number}'")
 
-                    # 2️⃣ Street name check
-                    if matched and user_street_name:
-                         if not rec_street_name:
-                            matched = False
-                    else:
-                         user_tokens = user_street_name.split()
-                         rec_tokens = rec_street_name.split()
+                    # 2️⃣ Street name check (EXACT match required if provided)
+                    if address_matched and user_street_name:
+                        if not rec_street_name:
+                            address_matched = False
+                            logging.debug("Street name check failed: record has no street name")
+                        else:
+                            # EXACT matching: normalized street names must be identical
+                            # No partial/prefix matching - must match exactly
+                            # Compare as strings (already normalized)
+                            if user_street_name.strip() != rec_street_name.strip():
+                                address_matched = False
+                                logging.debug(f"Street name EXACT mismatch: user='{user_street_name}' vs rec='{rec_street_name}'")
 
-                         for ut in user_tokens:
-                              if not any(rt.startswith(ut) or ut.startswith(rt) for rt in rec_tokens):
-                                 matched = False
-                                 break
-
-                    # 3️⃣ ZIP validation (ONLY if user provided zip)
-                    if matched and user_zip:
+                    # 3️⃣ ZIP validation (EXACT match required if provided)
+                    if address_matched and user_zip:
                         user_zip_clean = user_zip[:5]
                         if not rec_zip or user_zip_clean != rec_zip[:5]:
-                            matched = False
+                            address_matched = False
+                            logging.debug(f"ZIP mismatch: user='{user_zip_clean}' vs rec='{rec_zip[:5] if rec_zip else None}'")
 
-                # ❌ DO NOT fall back if user provided zip (avoid zip-only matches)
-                if not matched and not (zip_q or zip_from_google):
+                    # If structured fields provided but don't match, skip this record (no fallback)
+                    if not address_matched:
+                        continue
+
+                else:
+                    # No structured fields provided - use fallback scoring-based matching
                     # Build normalized candidate addresses from record
                     rec_addrs = record_address_values(rec)
                     if not rec_addrs:
@@ -663,7 +686,7 @@ def search(
                         rec_num, rec_tokens = canonicalize_address_main(rec_addrdesc)
                         if in_num and rec_num and in_num == rec_num and rec_tokens and in_tokens:
                             if set(rec_tokens) == set(in_tokens):
-                                matched = True
+                                address_matched = True
                                 matched_by = "addrdesc_canonical"
 
                     # helper: count token matches between route tokens and candidate tokens
@@ -680,15 +703,6 @@ def search(
 
                     for cand in rec_addrs:
                         score = 0
-
-                        # ZIP helps but is not required
-                        # if zip_from_google or zip_code:
-                        #     z = (zip_from_google or zip_code or "").strip()
-                        #     rec_zip = (rec.get("OriginalZip") or rec.get("ZipCode") or "").strip()
-                        #     if z and rec_zip and rec_zip.startswith(z):
-                        #         score += 3
-                        #     elif z and (cand.endswith(z) or (" " + z + " ") in (" " + cand + " ")):
-                        #         score += 2
 
                         # street number alignment helps
                         if street_number and (cand.startswith(street_number + " ") or cand.startswith(street_number + "-") or cand.startswith(street_number + ",")):
@@ -715,22 +729,44 @@ def search(
                             score += 1
 
                         if score >= 3:
-                            matched = True
+                            address_matched = True
                             if not matched_by:
                                 matched_by = "score"
                             break
 
-                if not matched:
+                # If address doesn't match, skip this record
+                if not address_matched:
                     continue
 
-                # If matched by address, check optional permit requirement
+                # ============================================================
+                # STEP 2: PERMIT NUMBER MATCHING (if provided, must match exactly)
+                # ============================================================
                 if permit:
                     p = (permit or "").strip().lower()
                     rec_p = (rec.get("PermitNum") or rec.get("PermitNumber") or "").strip().lower()
                     if not rec_p or p != rec_p:
-                        continue  # address matched but permit did not; try next record
+                        # Address matched but permit did not - skip this record
+                        logging.debug(f"Permit mismatch: user='{p}' vs rec='{rec_p}'")
+                        continue
 
-                # Date filters already applied above; if we reached here, address (and permit, if any) matched
+                # ============================================================
+                # STEP 3: DATE RANGE MATCHING (if provided, must match exactly)
+                # ============================================================
+                # Date filters are checked AFTER address and permit match
+                appl = rec.get("AppliedDate", "")
+                if date_from and appl:
+                    if appl < date_from:
+                        logging.debug(f"Date range mismatch: AppliedDate='{appl}' < date_from='{date_from}'")
+                        continue
+                if date_to and appl:
+                    if appl > date_to:
+                        logging.debug(f"Date range mismatch: AppliedDate='{appl}' > date_to='{date_to}'")
+                        continue
+
+                # ============================================================
+                # STEP 4: ALL CHECKS PASSED - Generate PDF
+                # ============================================================
+                # If we reached here, address matched (and permit/date if provided)
                 # Generate PDF immediately and return
                 rec_id = pick_id_from_record(rec)
                 try:
@@ -779,6 +815,16 @@ def search(
 
     dur_ms = int((time.perf_counter() - start_t) * 1000)
     logging.info("SEARCH done | results=%d canonical_hit=%s duration_ms=%d", len(results_sorted), canonical_hit, dur_ms)
+    
+    # If no results found, return "record not found" message
+    if len(results_sorted) == 0:
+        return JSONResponse({
+            "results": [],
+            "message": "Record not found. Your search data is not in records or the provided fields do not match exactly.",
+            "duration_ms": dur_ms,
+            "canonical_hit": canonical_hit
+        })
+    
     return JSONResponse({"results": results_sorted, "duration_ms": dur_ms, "canonical_hit": canonical_hit})
 
 # ---------- NEW: record endpoint now generates PDF only if record exists ----------
