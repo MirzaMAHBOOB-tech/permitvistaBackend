@@ -592,6 +592,22 @@ def search(
     try:
         scan_max = min(max(1, int(scan_limit or MAX_CSV_FILES)), 5000)
         scanned = 0
+        
+        # First, list all CSV files available in Azure for debugging
+        all_csv_files = []
+        for blob in src_container.list_blobs():
+            name = getattr(blob, "name", str(blob))
+            if name.lower().endswith(".csv"):
+                all_csv_files.append(name)
+        
+        logging.info("SEARCH Azure scan | total_csv_files=%d scan_limit=%d", len(all_csv_files), scan_max)
+        if len(all_csv_files) > 0 and len(all_csv_files) <= 20:
+            logging.info("SEARCH CSV files in Azure: %s", all_csv_files)
+        elif len(all_csv_files) > 20:
+            logging.info("SEARCH CSV files in Azure (first 20): %s", all_csv_files[:20])
+            logging.info("SEARCH ... and %d more CSV files", len(all_csv_files) - 20)
+        
+        # Now scan the CSV files
         for blob in src_container.list_blobs():
             if scanned >= scan_max:
                 logging.info("Reached scan limit during search (%d)", scan_max)
@@ -608,8 +624,8 @@ def search(
                 df_len = len(df)
             except Exception:
                 df_len = -1
-            if scanned % 10 == 1:
-                logging.info("Scanning blob %d/%d: %s rows=%s", scanned, scan_max, name, df_len if df_len >= 0 else "?")
+            # Log every file being scanned for debugging
+            logging.info("Scanning blob %d/%d: %s rows=%s", scanned, scan_max, name, df_len if df_len >= 0 else "?")
 
             for _, row in df.iterrows():
                 rec = {k.strip(): ("" if pd.isna(v) else str(v)) for k, v in row.items()}
@@ -655,18 +671,25 @@ def search(
                             # Compare as strings (already normalized)
                             if user_street_name.strip() != rec_street_name.strip():
                                 address_matched = False
-                                logging.debug(f"Street name EXACT mismatch: user='{user_street_name}' vs rec='{rec_street_name}'")
+                                logging.debug(f"[MATCH] Street name EXACT mismatch: user='{user_street_name}' vs rec='{rec_street_name}' (blob={name})")
+                            else:
+                                logging.debug(f"[MATCH] Street name matched: '{user_street_name}' == '{rec_street_name}' (blob={name})")
 
                     # 3️⃣ ZIP validation (EXACT match required if provided)
                     if address_matched and user_zip:
                         user_zip_clean = user_zip[:5]
                         if not rec_zip or user_zip_clean != rec_zip[:5]:
                             address_matched = False
-                            logging.debug(f"ZIP mismatch: user='{user_zip_clean}' vs rec='{rec_zip[:5] if rec_zip else None}'")
+                            logging.debug(f"[MATCH] ZIP mismatch: user='{user_zip_clean}' vs rec='{rec_zip[:5] if rec_zip else None}' (blob={name})")
+                        else:
+                            logging.debug(f"[MATCH] ZIP matched: '{user_zip_clean}' == '{rec_zip[:5]}' (blob={name})")
 
                     # If structured fields provided but don't match, skip this record (no fallback)
                     if not address_matched:
+                        logging.debug(f"[MATCH] Address mismatch - skipping record (blob={name}, OriginalAddress1={rec.get('OriginalAddress1', 'N/A')[:50]})")
                         continue
+                    else:
+                        logging.info(f"[MATCH] Address matched! (blob={name}, OriginalAddress1={rec.get('OriginalAddress1', 'N/A')[:50]})")
 
                 else:
                     # No structured fields provided - use fallback scoring-based matching
