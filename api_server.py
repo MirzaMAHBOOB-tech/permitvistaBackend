@@ -590,7 +590,17 @@ def search(
     canonical_hit = True
 
     try:
-        scan_max = min(max(1, int(scan_limit or MAX_CSV_FILES)), 5000)
+        # If user provided date range, use scan_limit for performance
+        # If no date range, scan ALL files until exact match found
+        has_date_range = bool(date_from or date_to)
+        if has_date_range:
+            scan_max = min(max(1, int(scan_limit or MAX_CSV_FILES)), 5000)
+            logging.info("SEARCH date range provided - using scan_limit=%d", scan_max)
+        else:
+            # No date range - scan ALL files until match found
+            scan_max = 999999  # Effectively unlimited
+            logging.info("SEARCH no date range - will scan ALL files until exact match found")
+        
         scanned = 0
         
         # First, list all CSV files available in Azure and sort by date (newest first)
@@ -666,8 +676,18 @@ def search(
             logging.info("SEARCH ... and %d more CSV files", len(all_csv_files) - 20)
         
         # Now scan the CSV files (already sorted newest first)
+        # If no date range provided, scan ALL files until match found (no limit)
+        # If date range provided, respect scan_max limit
+        files_to_scan = all_csv_files if not (date_from or date_to) else all_csv_files[:scan_max]
+        actual_scan_limit = len(all_csv_files) if not (date_from or date_to) else scan_max
+        
+        if not (date_from or date_to):
+            logging.info("SEARCH no date range provided - will scan ALL %d files until match found", len(all_csv_files))
+        else:
+            logging.info("SEARCH date range provided - will scan up to %d files", scan_max)
+        
         scanned_file_names = set()  # Track which files we've scanned
-        for csv_file_name in all_csv_files[:scan_max]:
+        for csv_file_name in files_to_scan:
             if csv_file_name in scanned_file_names:
                 continue
             scanned_file_names.add(csv_file_name)
@@ -683,7 +703,8 @@ def search(
                 continue
             
             name = csv_file_name
-            if scanned >= scan_max:
+            # Only enforce scan limit if date range was provided
+            if (date_from or date_to) and scanned >= scan_max:
                 logging.info("Reached scan limit during search (%d)", scan_max)
                 break
 
@@ -695,8 +716,11 @@ def search(
                 df_len = len(df)
             except Exception:
                 df_len = -1
-            # Log every file being scanned for debugging
-            logging.info("Scanning blob %d/%d: %s rows=%s", scanned, scan_max, name, df_len if df_len >= 0 else "?")
+            
+            # Log progress every 100 files (to avoid log spam when scanning all files)
+            if scanned % 100 == 0 or scanned <= 20:
+                total_to_scan = len(files_to_scan) if not (date_from or date_to) else scan_max
+                logging.info("Scanning blob %d/%s: %s rows=%s", scanned, total_to_scan if (date_from or date_to) else "ALL", name, df_len if df_len >= 0 else "?")
 
             for _, row in df.iterrows():
                 rec = {k.strip(): ("" if pd.isna(v) else str(v)) for k, v in row.items()}
