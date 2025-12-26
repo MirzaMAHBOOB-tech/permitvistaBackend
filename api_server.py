@@ -593,28 +593,99 @@ def search(
         scan_max = min(max(1, int(scan_limit or MAX_CSV_FILES)), 5000)
         scanned = 0
         
-        # First, list all CSV files available in Azure for debugging
+        # First, list all CSV files available in Azure and sort by date (newest first)
         all_csv_files = []
         for blob in src_container.list_blobs():
             name = getattr(blob, "name", str(blob))
             if name.lower().endswith(".csv"):
                 all_csv_files.append(name)
         
+        # Extract date from filename or path for filtering and sorting
+        # Files are typically in format: YYYY/MM/DD/tampa_permits_YYYYMMDD_*.csv
+        def extract_date_from_path(path):
+            """Extract date from path like '2023/05/05/tampa_permits_20230505_*.csv'
+            Returns (year, month, day) tuple or (0, 0, 0) if not found"""
+            parts = path.split('/')
+            if len(parts) >= 3:
+                try:
+                    year = int(parts[0])
+                    month = int(parts[1])
+                    day = int(parts[2])
+                    return (year, month, day)
+                except (ValueError, IndexError):
+                    pass
+            # Fallback: try to extract from filename
+            import re
+            date_match = re.search(r'(\d{4})(\d{2})(\d{2})', path)
+            if date_match:
+                return (int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3)))
+            return (0, 0, 0)  # Put files without dates at the end
+        
+        def date_tuple_to_string(date_tuple):
+            """Convert (year, month, day) to 'YYYY-MM-DD' string"""
+            year, month, day = date_tuple
+            if year == 0:
+                return None
+            return f"{year:04d}-{month:02d}-{day:02d}"
+        
+        # If user provided date range, filter CSV files to only those within the range
+        if date_from or date_to:
+            logging.info("SEARCH date range provided | date_from=%s date_to=%s - filtering CSV files", date_from, date_to)
+            filtered_csv_files = []
+            for csv_file in all_csv_files:
+                file_date_tuple = extract_date_from_path(csv_file)
+                file_date_str = date_tuple_to_string(file_date_tuple)
+                
+                if file_date_str is None:
+                    # File has no date - include it (better safe than sorry)
+                    filtered_csv_files.append(csv_file)
+                    continue
+                
+                # Check if file date is within range
+                include_file = True
+                if date_from and file_date_str < date_from:
+                    include_file = False
+                if date_to and file_date_str > date_to:
+                    include_file = False
+                
+                if include_file:
+                    filtered_csv_files.append(csv_file)
+            
+            original_count = len(all_csv_files)
+            all_csv_files = filtered_csv_files
+            logging.info("SEARCH date range filter | filtered from %d to %d CSV files", original_count, len(all_csv_files))
+        
+        # Sort by date descending (newest first) - this ensures recent records are found first
+        all_csv_files.sort(key=extract_date_from_path, reverse=True)
+        
         logging.info("SEARCH Azure scan | total_csv_files=%d scan_limit=%d", len(all_csv_files), scan_max)
         if len(all_csv_files) > 0 and len(all_csv_files) <= 20:
-            logging.info("SEARCH CSV files in Azure: %s", all_csv_files)
+            logging.info("SEARCH CSV files in Azure (newest first): %s", all_csv_files[:20])
         elif len(all_csv_files) > 20:
-            logging.info("SEARCH CSV files in Azure (first 20): %s", all_csv_files[:20])
+            logging.info("SEARCH CSV files in Azure (newest first, first 20): %s", all_csv_files[:20])
             logging.info("SEARCH ... and %d more CSV files", len(all_csv_files) - 20)
         
-        # Now scan the CSV files
-        for blob in src_container.list_blobs():
+        # Now scan the CSV files (already sorted newest first)
+        scanned_file_names = set()  # Track which files we've scanned
+        for csv_file_name in all_csv_files[:scan_max]:
+            if csv_file_name in scanned_file_names:
+                continue
+            scanned_file_names.add(csv_file_name)
+            
+            # Get blob by name
+            try:
+                blob_client = src_container.get_blob_client(csv_file_name)
+                if not blob_client.exists():
+                    logging.warning("CSV file not found in Azure: %s", csv_file_name)
+                    continue
+            except Exception as e:
+                logging.warning("Error checking blob %s: %s", csv_file_name, e)
+                continue
+            
+            name = csv_file_name
             if scanned >= scan_max:
                 logging.info("Reached scan limit during search (%d)", scan_max)
                 break
-            name = getattr(blob, "name", str(blob))
-            if not name.lower().endswith(".csv"):
-                continue
 
             df = _read_csv_bytes_from_blob(src_container, name)
             scanned += 1
