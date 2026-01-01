@@ -143,6 +143,7 @@ _index_initialized = False
 def _initialize_address_index():
     """Initialize address index with extraction functions and load from Azure if available"""
     global _index_initialized
+    logging.info("🔧 Initializing address index system...")
     if not _index_initialized:
         set_extraction_functions(
             extract_record_address_components,
@@ -150,19 +151,22 @@ def _initialize_address_index():
             pick_id_from_record
         )
         _index_initialized = True
+        logging.info("✅ Address index extraction functions registered")
         
         # Set Azure storage for index persistence (use pdf_container)
         if pdf_container:
             address_index.set_azure_storage(pdf_container)
-            logging.info("Address index will use Azure Storage for persistence: %s/%s", 
+            logging.info("✅ Address index will use Azure Storage for persistence: %s/%s", 
                        OUTPUT_CONTAINER, address_index.INDEX_BLOB_NAME)
             # Try to load existing index from Azure on startup
             if address_index.load_from_azure():
                 logging.info("✅ Address index loaded from Azure Storage on startup - ready for fast searches!")
             else:
-                logging.info("No existing index found in Azure - will build and save on first search")
+                logging.info("ℹ️ No existing index found in Azure - will build and save on first search")
         else:
-            logging.warning("Azure storage not available - indexing disabled (ENABLE_INDEXING will be ignored)")
+            logging.warning("⚠️ Azure storage (pdf_container) not available - indexing disabled (ENABLE_INDEXING will be ignored)")
+    else:
+        logging.info("Address index already initialized")
 
 # ----------------- Helpers -----------------
 def _read_csv_bytes_from_blob(container_client, blob_name: str) -> Optional[pd.DataFrame]:
@@ -669,26 +673,29 @@ def search(
         
         # Check if we should use index: no date range + structured fields + index available
         user_provided_structured = bool(street_number_q or street_name_q or zip_q)
-        # Check if index is loaded AND has data in memory (not just the flag)
-        index_has_data = address_index.is_loaded() and len(address_index._index) > 0
-        use_index = (ENABLE_INDEXING and not has_date_range and user_provided_structured and index_has_data)
         
-        # If index not loaded in memory and no date range, try to load from Azure or trigger build
+        # Debug: Log index status
+        logging.info("SEARCH index check | ENABLE_INDEXING=%s has_date_range=%s user_provided_structured=%s is_loading=%s has_azure_storage=%s is_loaded=%s index_size=%d",
+                    ENABLE_INDEXING, has_date_range, user_provided_structured, 
+                    address_index.is_loading(), address_index._use_azure_storage, 
+                    address_index.is_loaded(), len(address_index._index))
+        
+        # First, try to ensure index is loaded if it exists in Azure
         # Only if indexing is enabled and Azure storage is available
-        if (ENABLE_INDEXING and not has_date_range and not index_has_data 
+        if (ENABLE_INDEXING and not has_date_range and user_provided_structured
             and not address_index.is_loading() and src_container and address_index._use_azure_storage):
-            # First try to load from Azure (if it exists)
-            if address_index.is_loaded() and len(address_index._index) == 0:
-                logging.info("SEARCH index marked as loaded but empty - attempting to reload from Azure")
+            # Check if index is loaded AND has data in memory
+            index_has_data = address_index.is_loaded() and len(address_index._index) > 0
+            
+            if not index_has_data:
+                # Try to load from Azure (synchronously, so we can use it for this search)
+                logging.info("SEARCH index not in memory - attempting to load from Azure")
                 if address_index.load_from_azure():
-                    logging.info("✅ Index reloaded from Azure - using index for search")
-                    # Re-check if we can use index now
-                    use_index = (ENABLE_INDEXING and not has_date_range and user_provided_structured and len(address_index._index) > 0)
+                    logging.info("✅ Index loaded from Azure - will use for this search")
+                    index_has_data = len(address_index._index) > 0
                 else:
-                    logging.info("Failed to reload from Azure - will trigger new index build")
-                    # Clear loaded flag and trigger rebuild
-                    address_index._loaded = False
-                    logging.info("SEARCH index not found in Azure - triggering background index build and save to Azure")
+                    # Index doesn't exist in Azure - trigger background build for future searches
+                    logging.info("SEARCH index not found in Azure - triggering background index build")
                     def build_index_background():
                         try:
                             address_index.build_index_from_azure(src_container, max_files=INDEX_FILE_LIMIT if INDEX_FILE_LIMIT > 0 else None)
@@ -696,26 +703,39 @@ def search(
                         except Exception as e:
                             logging.exception("Background index build failed: %s", e)
                     threading.Thread(target=build_index_background, daemon=True).start()
-            elif not address_index.is_loaded():
-                # Index doesn't exist - trigger build
-                logging.info("SEARCH index not found in Azure - triggering background index build and save to Azure")
-                def build_index_background():
-                    try:
-                        address_index.build_index_from_azure(src_container, max_files=INDEX_FILE_LIMIT if INDEX_FILE_LIMIT > 0 else None)
-                        logging.info("✅ Index build complete and saved to Azure - future searches will be fast!")
-                    except Exception as e:
-                        logging.exception("Background index build failed: %s", e)
-                threading.Thread(target=build_index_background, daemon=True).start()
-        elif not ENABLE_INDEXING:
-            logging.debug("SEARCH indexing is disabled (ENABLE_INDEXING=false) - using scan-only mode")
-        elif not address_index._use_azure_storage:
-            logging.debug("SEARCH Azure storage not available - indexing disabled")
+        else:
+            # Log why index loading is being skipped
+            if not ENABLE_INDEXING:
+                logging.info("SEARCH index loading skipped: ENABLE_INDEXING=false")
+            elif has_date_range:
+                logging.info("SEARCH index loading skipped: date range provided")
+            elif not user_provided_structured:
+                logging.info("SEARCH index loading skipped: no structured address fields provided")
+            elif address_index.is_loading():
+                logging.info("SEARCH index loading skipped: index is currently being built")
+            elif not src_container:
+                logging.info("SEARCH index loading skipped: src_container not available")
+            elif not address_index._use_azure_storage:
+                logging.info("SEARCH index loading skipped: Azure storage not configured for index")
+        
+        # Now check if we can use the index
+        index_has_data = address_index.is_loaded() and len(address_index._index) > 0
+        use_index = (ENABLE_INDEXING and not has_date_range and user_provided_structured and index_has_data)
+        
+        if not use_index and ENABLE_INDEXING and not has_date_range and user_provided_structured:
+            if not address_index._use_azure_storage:
+                logging.info("SEARCH Azure storage not available - indexing disabled - using full scan")
+            elif address_index.is_loading():
+                logging.info("SEARCH index is currently being built - using full scan for this request")
+            else:
+                logging.info("SEARCH index not available - using full scan (index may be building in background)")
         
         # ============================================================
         # INDEX-BASED SEARCH (fast path when index is loaded from Azure)
         # ============================================================
         if use_index:
-            logging.info("SEARCH using address index from Azure for fast lookup")
+            logging.info("SEARCH ✅ USING INDEX - Fast lookup mode (index has %d unique addresses, %d total records)", 
+                       len(address_index._index), address_index._total_records_indexed)
             
             # Extract user's address components (same as structured matching logic)
             user_street_number = (street_number_q or "").strip() if street_number_q else None
