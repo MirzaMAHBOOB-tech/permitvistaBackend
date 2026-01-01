@@ -820,6 +820,8 @@ def search(
         # ============================================================
         # Note: all_csv_files is already defined above
         
+        scanned = 0  # Initialize scanned counter for scanning loop
+        
         # Extract date from filename or path for filtering and sorting
         # Files are typically in format: YYYY/MM/DD/tampa_permits_YYYYMMDD_*.csv
         def extract_date_from_path(path):
