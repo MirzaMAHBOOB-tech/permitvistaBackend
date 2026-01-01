@@ -104,9 +104,22 @@ class AddressIndex:
                       Useful for memory-constrained environments (e.g., index only last 10k files)
         """
         with self._lock:
-            if self._loaded:
-                logging.info("Address index already loaded, skipping build")
+            if self._loaded and len(self._index) > 0:
+                logging.info("Address index already loaded in memory (%d records), skipping build", self._total_records_indexed)
                 return
+            # If index is marked as loaded but empty, try to reload from Azure first
+            if self._loaded and len(self._index) == 0 and self._use_azure_storage and self._azure_container:
+                logging.info("Index marked as loaded but empty - attempting to reload from Azure before rebuilding")
+                # Release lock temporarily to allow reload
+                self._lock.release()
+                try:
+                    if self.load_from_azure():
+                        logging.info("✅ Index reloaded from Azure - no rebuild needed")
+                        return
+                finally:
+                    self._lock.acquire()
+                # If reload failed, continue with build
+                logging.info("Failed to reload from Azure - will rebuild index")
             if self._loading:
                 logging.info("Address index is currently being built by another thread")
                 return
@@ -258,10 +271,10 @@ class AddressIndex:
                 try:
                     self._save_to_azure()
                     logging.info("✅ Index saved to Azure Blob Storage: %s", self.INDEX_BLOB_NAME)
-                    # Clear from memory after saving to Azure (save RAM)
-                    with self._lock:
-                        self._index.clear()
-                        logging.info("Index cleared from memory after saving to Azure (memory optimized)")
+                    # Keep index in memory for fast lookups
+                    # Index is saved to Azure for persistence across server restarts
+                    # Memory usage is acceptable for performance benefits
+                    logging.info("Index saved to Azure and kept in memory for fast lookups")
                 except Exception as e:
                     logging.warning("Failed to save index to Azure: %s", e)
                     raise  # Re-raise so index stays in memory if save fails
@@ -299,11 +312,23 @@ class AddressIndex:
             city: Optional city filter (normalized)
         
         Returns:
-            List of RecordLocation objects matching the criteria (from indexed files only)
+            List of RecordLocation objects matching the criteria
         """
-        # Allow lookup even if index is still being built (partial index support)
-        if not self._loaded and not self._loading:
-            return []
+        # If index is marked as loaded but empty in memory, reload from Azure
+        if self._loaded and len(self._index) == 0 and self._use_azure_storage and self._azure_container:
+            logging.debug("Index marked as loaded but empty in memory - reloading from Azure")
+            if not self.load_from_azure():
+                logging.warning("Index was marked as loaded but failed to reload from Azure - clearing loaded flag")
+                with self._lock:
+                    self._loaded = False
+                return []
+        
+        # If index not loaded and not loading, try to load from Azure
+        if not self._loaded and not self._loading and self._use_azure_storage and self._azure_container:
+            if self.load_from_azure():
+                logging.info("Index loaded from Azure on-demand for lookup")
+            else:
+                return []  # No index available
         
         # Normalize inputs
         street_number = (street_number or "").strip() if street_number else None

@@ -667,23 +667,45 @@ def search(
             if name.lower().endswith(".csv"):
                 all_csv_files.append(name)
         
-        # Check if we should use index: no date range + structured fields + index loaded from Azure
+        # Check if we should use index: no date range + structured fields + index available
         user_provided_structured = bool(street_number_q or street_name_q or zip_q)
-        # Only use index if it's loaded from Azure (no partial index when using Azure storage)
-        use_index = (ENABLE_INDEXING and not has_date_range and user_provided_structured and address_index.is_loaded())
+        # Check if index is loaded AND has data in memory (not just the flag)
+        index_has_data = address_index.is_loaded() and len(address_index._index) > 0
+        use_index = (ENABLE_INDEXING and not has_date_range and user_provided_structured and index_has_data)
         
-        # If index not loaded and no date range, trigger build in background (lazy loading)
+        # If index not loaded in memory and no date range, try to load from Azure or trigger build
         # Only if indexing is enabled and Azure storage is available
-        if (ENABLE_INDEXING and not has_date_range and not address_index.is_loaded() 
+        if (ENABLE_INDEXING and not has_date_range and not index_has_data 
             and not address_index.is_loading() and src_container and address_index._use_azure_storage):
-            logging.info("SEARCH index not found in Azure - triggering background index build and save to Azure")
-            def build_index_background():
-                try:
-                    address_index.build_index_from_azure(src_container, max_files=INDEX_FILE_LIMIT if INDEX_FILE_LIMIT > 0 else None)
-                    logging.info("✅ Index build complete and saved to Azure - future searches will be fast!")
-                except Exception as e:
-                    logging.exception("Background index build failed: %s", e)
-            threading.Thread(target=build_index_background, daemon=True).start()
+            # First try to load from Azure (if it exists)
+            if address_index.is_loaded() and len(address_index._index) == 0:
+                logging.info("SEARCH index marked as loaded but empty - attempting to reload from Azure")
+                if address_index.load_from_azure():
+                    logging.info("✅ Index reloaded from Azure - using index for search")
+                    # Re-check if we can use index now
+                    use_index = (ENABLE_INDEXING and not has_date_range and user_provided_structured and len(address_index._index) > 0)
+                else:
+                    logging.info("Failed to reload from Azure - will trigger new index build")
+                    # Clear loaded flag and trigger rebuild
+                    address_index._loaded = False
+                    logging.info("SEARCH index not found in Azure - triggering background index build and save to Azure")
+                    def build_index_background():
+                        try:
+                            address_index.build_index_from_azure(src_container, max_files=INDEX_FILE_LIMIT if INDEX_FILE_LIMIT > 0 else None)
+                            logging.info("✅ Index build complete and saved to Azure - future searches will be fast!")
+                        except Exception as e:
+                            logging.exception("Background index build failed: %s", e)
+                    threading.Thread(target=build_index_background, daemon=True).start()
+            elif not address_index.is_loaded():
+                # Index doesn't exist - trigger build
+                logging.info("SEARCH index not found in Azure - triggering background index build and save to Azure")
+                def build_index_background():
+                    try:
+                        address_index.build_index_from_azure(src_container, max_files=INDEX_FILE_LIMIT if INDEX_FILE_LIMIT > 0 else None)
+                        logging.info("✅ Index build complete and saved to Azure - future searches will be fast!")
+                    except Exception as e:
+                        logging.exception("Background index build failed: %s", e)
+                threading.Thread(target=build_index_background, daemon=True).start()
         elif not ENABLE_INDEXING:
             logging.debug("SEARCH indexing is disabled (ENABLE_INDEXING=false) - using scan-only mode")
         elif not address_index._use_azure_storage:
