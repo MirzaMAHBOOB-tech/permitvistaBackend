@@ -660,6 +660,13 @@ def search(
             scan_max = 999999  # Effectively unlimited
             logging.info("SEARCH no date range - will scan ALL files until exact match found")
         
+        # List all CSV files available in Azure (needed for both index and scanning)
+        all_csv_files = []
+        for blob in src_container.list_blobs():
+            name = getattr(blob, "name", str(blob))
+            if name.lower().endswith(".csv"):
+                all_csv_files.append(name)
+        
         # Check if we should use index: no date range + structured fields + index loaded from Azure
         user_provided_structured = bool(street_number_q or street_name_q or zip_q)
         # Only use index if it's loaded from Azure (no partial index when using Azure storage)
@@ -808,7 +815,10 @@ def search(
                 "index_used": True
             })
         
-        # Sort files by date (newest first) - needed for scanning
+        # ============================================================
+        # SCANNING-BASED SEARCH (fallback when index not available)
+        # ============================================================
+        # Note: all_csv_files is already defined above
         
         # Extract date from filename or path for filtering and sorting
         # Files are typically in format: YYYY/MM/DD/tampa_permits_YYYYMMDD_*.csv
