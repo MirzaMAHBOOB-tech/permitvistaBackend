@@ -1,7 +1,8 @@
 # address_index.py
 """
-In-memory address index for fast permit record lookups.
-Builds index from Azure Blob Storage CSV files on first request (lazy loading).
+Address index for fast permit record lookups.
+Can store index in Azure Blob Storage for persistence and memory efficiency.
+Builds index from Azure Blob Storage CSV files and saves to Azure.
 """
 import logging
 import threading
@@ -9,6 +10,9 @@ from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 from datetime import datetime
 import re
+import json
+import pickle
+from io import BytesIO
 
 # Import matching functions from api_server
 # We'll import these at runtime to avoid circular imports
@@ -25,7 +29,9 @@ def set_extraction_functions(extract_func, normalize_func, pick_id_func):
 
 
 class RecordLocation:
-    """Stores location information for a record in the index"""
+    """Stores location information for a record in the index (memory-optimized with __slots__)"""
+    __slots__ = ('blob_name', 'row_index', 'permit_id', 'permit_num', 'date', 'city')
+    
     def __init__(self, blob_name: str, row_index: int, permit_id: str, permit_num: str, 
                  date: str, city: str):
         self.blob_name = blob_name
@@ -52,6 +58,8 @@ class AddressIndex:
     Index structure: Dict[Tuple[str, str, str], List[RecordLocation]]
     """
     
+    INDEX_BLOB_NAME = "address_index.pickle"  # Name of index file in Azure
+    
     def __init__(self):
         # Index: (street_number, street_name, zip_code) -> List[RecordLocation]
         self._index: Dict[Tuple[str, str, str], List[RecordLocation]] = defaultdict(list)
@@ -61,6 +69,8 @@ class AddressIndex:
         self._build_start_time = None
         self._total_records_indexed = 0
         self._total_files_scanned = 0
+        self._use_azure_storage = False  # Will be set if Azure container is available
+        self._azure_container = None  # Azure container for storing index
     
     def is_loaded(self) -> bool:
         """Check if index is fully loaded"""
@@ -82,14 +92,16 @@ class AddressIndex:
                 "build_start_time": self._build_start_time.isoformat() if self._build_start_time else None
             }
     
-    def build_index_from_azure(self, src_container, progress_callback=None):
+    def build_index_from_azure(self, src_container, progress_callback=None, max_files=None):
         """
-        Build index by scanning all CSV files in Azure Blob Storage.
-        This is a one-time operation that may take 5-10 minutes.
+        Build index by scanning CSV files in Azure Blob Storage.
+        This is a one-time operation that may take 5-10 minutes for all files.
         
         Args:
             src_container: Azure ContainerClient for source CSVs
             progress_callback: Optional function(processed_files, total_files) called periodically
+            max_files: Optional limit on number of files to index (None = index all files)
+                      Useful for memory-constrained environments (e.g., index only last 10k files)
         """
         with self._lock:
             if self._loaded:
@@ -135,6 +147,14 @@ class AddressIndex:
                 return (0, 0, 0)
             
             all_csv_files.sort(key=extract_date_from_path, reverse=True)
+            
+            # Limit files if max_files is specified (for memory optimization)
+            if max_files and max_files > 0:
+                original_count = len(all_csv_files)
+                all_csv_files = all_csv_files[:max_files]
+                logging.info("Index build limited to %d most recent files (out of %d total) for memory optimization", 
+                           len(all_csv_files), original_count)
+                total_files = len(all_csv_files)  # Update total_files to reflect limit
             
             # Import pandas here to avoid circular dependency
             import pandas as pd
@@ -224,8 +244,27 @@ class AddressIndex:
                 self._loading = False
             
             build_duration = (datetime.now() - self._build_start_time).total_seconds()
-            logging.info("Address index build completed in %.1f seconds: %d records indexed, %d unique addresses, %d files scanned",
-                       build_duration, self._total_records_indexed, len(self._index), self._total_files_scanned)
+            logging.info("=" * 80)
+            logging.info("✅ ADDRESS INDEX BUILD COMPLETED SUCCESSFULLY!")
+            logging.info("   Duration: %.1f seconds (%.1f minutes)", build_duration, build_duration / 60)
+            logging.info("   Files indexed: %d / %d (100%%)", self._total_files_scanned, total_files)
+            logging.info("   Records indexed: %d", self._total_records_indexed)
+            logging.info("   Unique addresses: %d", len(self._index))
+            logging.info("   Status: Index is now ready for fast searches!")
+            logging.info("=" * 80)
+            
+            # Save index to Azure Storage and clear from memory to save RAM
+            if self._use_azure_storage and self._azure_container:
+                try:
+                    self._save_to_azure()
+                    logging.info("✅ Index saved to Azure Blob Storage: %s", self.INDEX_BLOB_NAME)
+                    # Clear from memory after saving to Azure (save RAM)
+                    with self._lock:
+                        self._index.clear()
+                        logging.info("Index cleared from memory after saving to Azure (memory optimized)")
+                except Exception as e:
+                    logging.warning("Failed to save index to Azure: %s", e)
+                    raise  # Re-raise so index stays in memory if save fails
         
         except Exception as e:
             logging.exception("Failed to build address index: %s", e)
@@ -233,12 +272,22 @@ class AddressIndex:
                 self._loading = False
             raise
     
+    def get_indexed_files(self) -> set:
+        """Get set of all blob names that have been indexed (for partial index support)"""
+        with self._lock:
+            indexed_files = set()
+            for locations in self._index.values():
+                for loc in locations:
+                    indexed_files.add(loc.blob_name)
+            return indexed_files
+    
     def lookup(self, street_number: Optional[str], street_name: Optional[str], 
                zip_code: Optional[str], date_from: Optional[str] = None, 
                date_to: Optional[str] = None, permit: Optional[str] = None,
                city: Optional[str] = None) -> List[RecordLocation]:
         """
         Look up records by address components.
+        Works with both full and partial index (returns matches from indexed files only).
         
         Args:
             street_number: Street number (e.g., "1508")
@@ -250,9 +299,10 @@ class AddressIndex:
             city: Optional city filter (normalized)
         
         Returns:
-            List of RecordLocation objects matching the criteria
+            List of RecordLocation objects matching the criteria (from indexed files only)
         """
-        if not self._loaded:
+        # Allow lookup even if index is still being built (partial index support)
+        if not self._loaded and not self._loading:
             return []
         
         # Normalize inputs
@@ -292,6 +342,81 @@ class AddressIndex:
             filtered.append(location)
         
         return filtered
+    
+    def set_azure_storage(self, container_client):
+        """Set Azure container for persisting index"""
+        self._azure_container = container_client
+        self._use_azure_storage = container_client is not None
+    
+    def _save_to_azure(self):
+        """Save index to Azure Blob Storage as pickle file"""
+        if not self._azure_container:
+            return
+        
+        # Convert index to serializable format
+        index_data = {
+            "index": {},
+            "total_records": self._total_records_indexed,
+            "total_files": self._total_files_scanned,
+            "build_time": self._build_start_time.isoformat() if self._build_start_time else None,
+            "version": "1.0"
+        }
+        
+        # Convert tuple keys to strings and RecordLocation to dicts
+        for key, locations in self._index.items():
+            key_str = f"{key[0]}|{key[1]}|{key[2]}"  # Convert tuple to string
+            index_data["index"][key_str] = [loc.to_dict() for loc in locations]
+        
+        # Serialize to pickle (more efficient than JSON for large data)
+        pickle_data = pickle.dumps(index_data)
+        
+        # Upload to Azure
+        blob_client = self._azure_container.get_blob_client(self.INDEX_BLOB_NAME)
+        blob_client.upload_blob(pickle_data, overwrite=True)
+        logging.info("Index saved to Azure: %s (%d bytes)", self.INDEX_BLOB_NAME, len(pickle_data))
+    
+    def load_from_azure(self) -> bool:
+        """
+        Load index from Azure Blob Storage.
+        Returns True if loaded successfully, False otherwise.
+        """
+        if not self._azure_container:
+            return False
+        
+        try:
+            blob_client = self._azure_container.get_blob_client(self.INDEX_BLOB_NAME)
+            if not blob_client.exists():
+                logging.info("Index file not found in Azure: %s", self.INDEX_BLOB_NAME)
+                return False
+            
+            # Download and deserialize
+            pickle_data = blob_client.download_blob().readall()
+            index_data = pickle.loads(pickle_data)
+            
+            # Reconstruct index
+            with self._lock:
+                self._index.clear()
+                for key_str, locations_dict in index_data["index"].items():
+                    # Convert string key back to tuple
+                    parts = key_str.split("|")
+                    key = (parts[0] if parts[0] else None, 
+                          parts[1] if parts[1] else None, 
+                          parts[2] if parts[2] else None)
+                    # Reconstruct RecordLocation objects
+                    self._index[key] = [RecordLocation(**loc_dict) for loc_dict in locations_dict]
+                
+                self._total_records_indexed = index_data.get("total_records", 0)
+                self._total_files_scanned = index_data.get("total_files", 0)
+                self._loaded = True
+                self._loading = False
+            
+            logging.info("✅ Index loaded from Azure: %d records, %d unique addresses, %d files",
+                       self._total_records_indexed, len(self._index), self._total_files_scanned)
+            return True
+        
+        except Exception as e:
+            logging.warning("Failed to load index from Azure: %s", e)
+            return False
     
     def clear(self):
         """Clear the index (for testing or rebuilding)"""

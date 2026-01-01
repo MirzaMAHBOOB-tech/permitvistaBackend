@@ -90,6 +90,10 @@ SRC_CONTAINER = os.getenv("SRC_CONTAINER")
 OUTPUT_CONTAINER = os.getenv("OUTPUT_CONTAINER")
 SAMPLE_PERMIT_LIMIT = int(os.getenv("SAMPLE_PERMIT_LIMIT", "1000"))
 MAX_CSV_FILES = int(os.getenv("MAX_CSV_FILES", "100"))
+# Enable/disable indexing (set to "false" to disable indexing and save memory)
+ENABLE_INDEXING = os.getenv("ENABLE_INDEXING", "true").lower() == "true"
+# Limit index to recent files only (set to number of files, e.g., "10000" for last 10k files)
+INDEX_FILE_LIMIT = int(os.getenv("INDEX_FILE_LIMIT", "0"))  # 0 = index all files
 
 # ----------------- FastAPI app -----------------
 app = FastAPI(title="Permit Certificates", docs_url=None, redoc_url=None)
@@ -137,7 +141,7 @@ address_index = AddressIndex()
 _index_initialized = False
 
 def _initialize_address_index():
-    """Initialize address index with extraction functions"""
+    """Initialize address index with extraction functions and load from Azure if available"""
     global _index_initialized
     if not _index_initialized:
         set_extraction_functions(
@@ -146,6 +150,19 @@ def _initialize_address_index():
             pick_id_from_record
         )
         _index_initialized = True
+        
+        # Set Azure storage for index persistence (use pdf_container)
+        if pdf_container:
+            address_index.set_azure_storage(pdf_container)
+            logging.info("Address index will use Azure Storage for persistence: %s/%s", 
+                       OUTPUT_CONTAINER, address_index.INDEX_BLOB_NAME)
+            # Try to load existing index from Azure on startup
+            if address_index.load_from_azure():
+                logging.info("✅ Address index loaded from Azure Storage on startup - ready for fast searches!")
+            else:
+                logging.info("No existing index found in Azure - will build and save on first search")
+        else:
+            logging.warning("Azure storage not available - indexing disabled (ENABLE_INDEXING will be ignored)")
 
 # ----------------- Helpers -----------------
 def _read_csv_bytes_from_blob(container_client, blob_name: str) -> Optional[pd.DataFrame]:
@@ -472,6 +489,26 @@ def canonicalize_address_main(s: str) -> Tuple[str, List[str]]:
 _initialize_address_index()
 
 # ----------------- Endpoints -----------------
+@app.get("/index-status")
+def index_status():
+    """Get current status of the address index"""
+    stats = address_index.get_stats()
+    total_files = 55043  # Approximate total CSV files
+    if stats["loading"]:
+        progress_pct = (stats["total_files"] / total_files * 100) if total_files > 0 else 0
+        status_msg = f"Indexing in progress: {stats['total_files']}/{total_files} files ({progress_pct:.1f}%)"
+    elif stats["loaded"]:
+        status_msg = f"Index complete: {stats['total_files']} files, {stats['total_records']} records, {stats['unique_addresses']} unique addresses"
+    else:
+        status_msg = "Index not started"
+    
+    return JSONResponse({
+        "status": "loading" if stats["loading"] else ("loaded" if stats["loaded"] else "not_started"),
+        "message": status_msg,
+        "stats": stats,
+        "total_files_estimated": total_files
+    })
+
 @app.get("/health")
 def health():
     return JSONResponse({
@@ -623,25 +660,33 @@ def search(
             scan_max = 999999  # Effectively unlimited
             logging.info("SEARCH no date range - will scan ALL files until exact match found")
         
-        # Check if we should use index: no date range + structured fields + index loaded
+        # Check if we should use index: no date range + structured fields + index loaded from Azure
         user_provided_structured = bool(street_number_q or street_name_q or zip_q)
-        use_index = (not has_date_range and user_provided_structured and address_index.is_loaded())
+        # Only use index if it's loaded from Azure (no partial index when using Azure storage)
+        use_index = (ENABLE_INDEXING and not has_date_range and user_provided_structured and address_index.is_loaded())
         
         # If index not loaded and no date range, trigger build in background (lazy loading)
-        if not has_date_range and not address_index.is_loaded() and not address_index.is_loading() and src_container:
-            logging.info("SEARCH index not loaded - triggering background index build (lazy loading)")
+        # Only if indexing is enabled and Azure storage is available
+        if (ENABLE_INDEXING and not has_date_range and not address_index.is_loaded() 
+            and not address_index.is_loading() and src_container and address_index._use_azure_storage):
+            logging.info("SEARCH index not found in Azure - triggering background index build and save to Azure")
             def build_index_background():
                 try:
-                    address_index.build_index_from_azure(src_container)
+                    address_index.build_index_from_azure(src_container, max_files=INDEX_FILE_LIMIT if INDEX_FILE_LIMIT > 0 else None)
+                    logging.info("✅ Index build complete and saved to Azure - future searches will be fast!")
                 except Exception as e:
                     logging.exception("Background index build failed: %s", e)
             threading.Thread(target=build_index_background, daemon=True).start()
+        elif not ENABLE_INDEXING:
+            logging.debug("SEARCH indexing is disabled (ENABLE_INDEXING=false) - using scan-only mode")
+        elif not address_index._use_azure_storage:
+            logging.debug("SEARCH Azure storage not available - indexing disabled")
         
         # ============================================================
-        # INDEX-BASED SEARCH (fast path when index is available)
+        # INDEX-BASED SEARCH (fast path when index is loaded from Azure)
         # ============================================================
         if use_index:
-            logging.info("SEARCH using address index for fast lookup")
+            logging.info("SEARCH using address index from Azure for fast lookup")
             
             # Extract user's address components (same as structured matching logic)
             user_street_number = (street_number_q or "").strip() if street_number_q else None
@@ -661,7 +706,7 @@ def search(
             
             logging.info("SEARCH index lookup found %d candidate records", len(index_matches))
             
-            # Process each match from index
+            # Process each match from index (works for both full and partial index)
             for location in index_matches:
                 try:
                     # Read the specific CSV file and row
@@ -752,7 +797,7 @@ def search(
                     logging.warning("Error processing index match from %s row %d: %s", location.blob_name, location.row_index, e)
                     continue
             
-            # No matches found from index
+            # If using index and no matches found, return "not found"
             dur_ms = int((time.perf_counter() - start_t) * 1000)
             logging.info("SEARCH index lookup completed - no matches found | duration_ms=%d", dur_ms)
             return JSONResponse({
@@ -763,14 +808,7 @@ def search(
                 "index_used": True
             })
         
-        scanned = 0
-        
-        # First, list all CSV files available in Azure and sort by date (newest first)
-        all_csv_files = []
-        for blob in src_container.list_blobs():
-            name = getattr(blob, "name", str(blob))
-            if name.lower().endswith(".csv"):
-                all_csv_files.append(name)
+        # Sort files by date (newest first) - needed for scanning
         
         # Extract date from filename or path for filtering and sorting
         # Files are typically in format: YYYY/MM/DD/tampa_permits_YYYYMMDD_*.csv
