@@ -327,13 +327,17 @@ class AddressIndex:
                     self._total_files_scanned = resume_from + processed_files
                     
                     # Save checkpoint at multiple intervals to prevent data loss on server restart
-                    # Save at 4900 (before 5000) to avoid restart during save, and at 1000, 2000, 3000, 4000 for frequent backups
-                    # Also save every 500 files after 5000 for regular backups
-                    checkpoint_intervals = [1000, 2000, 3000, 4000, 4900, 5000]
-                    if self._total_files_scanned >= 5000 and self._total_files_scanned % 500 == 0:
-                        checkpoint_intervals.append(self._total_files_scanned)
+                    # Save every 1000 files for frequent backups (ensures progress is saved regularly)
+                    # Also save at 4900 (before 5000) to avoid restart during save
+                    should_save_checkpoint = False
+                    if self._total_files_scanned % 1000 == 0:
+                        # Save every 1000 files
+                        should_save_checkpoint = True
+                    elif self._total_files_scanned in [4900, 5000]:
+                        # Save at specific intervals
+                        should_save_checkpoint = True
                     
-                    if self._total_files_scanned in checkpoint_intervals and self._use_azure_storage and self._azure_container and not self._saving:
+                    if should_save_checkpoint and self._use_azure_storage and self._azure_container and not self._saving:
                         try:
                             self._saving = True  # Prevent concurrent saves
                             # Estimate current index size
@@ -346,14 +350,30 @@ class AddressIndex:
                             self._save_to_azure()
                             save_duration = time.time() - save_start
                             
-                            # Verify the file was actually saved
+                            # Verify the file was actually saved with correct data
                             blob_client = self._azure_container.get_blob_client(self.INDEX_BLOB_NAME)
                             if blob_client.exists():
                                 props = blob_client.get_blob_properties()
                                 actual_size_mb = props.size / (1024 * 1024)
                                 container_name = self._azure_container.container_name if hasattr(self._azure_container, 'container_name') else 'container'
-                                logging.info("✅✅✅ Checkpoint saved successfully in %.1f seconds - Actual size: %.1f MB ✅✅✅", save_duration, actual_size_mb)
-                                logging.info("✅ Checkpoint verification: File exists in Azure at %s/%s", container_name, self.INDEX_BLOB_NAME)
+                                
+                                # Verify the saved file has the correct file count by reloading metadata
+                                try:
+                                    verify_data = blob_client.download_blob().readall()
+                                    verify_index = pickle.loads(verify_data)
+                                    saved_file_count = verify_index.get("total_files", 0)
+                                    if saved_file_count == self._total_files_scanned:
+                                        logging.info("✅✅✅ Checkpoint saved successfully in %.1f seconds - Actual size: %.1f MB - Verified: %d files saved ✅✅✅", 
+                                                   save_duration, actual_size_mb, saved_file_count)
+                                        logging.info("✅ Checkpoint verification: File exists in Azure at %s/%s with correct file count (%d)", 
+                                                   container_name, self.INDEX_BLOB_NAME, saved_file_count)
+                                    else:
+                                        logging.error("❌❌❌ CRITICAL: Checkpoint save verification failed! Expected %d files but saved file has %d files!", 
+                                                    self._total_files_scanned, saved_file_count)
+                                except Exception as verify_err:
+                                    logging.warning("⚠️ Could not verify checkpoint file contents: %s", verify_err)
+                                    logging.info("✅✅✅ Checkpoint saved successfully in %.1f seconds - Actual size: %.1f MB ✅✅✅", 
+                                               save_duration, actual_size_mb)
                             else:
                                 logging.error("❌❌❌ CRITICAL: Checkpoint save reported success but file not found in Azure! Index may be lost on restart!")
                         except Exception as e:
@@ -607,8 +627,13 @@ class AddressIndex:
                 self._loaded = True
                 self._loading = False
             
-            logging.info("✅ Index loaded from Azure: %d records, %d unique addresses, %d files",
-                       self._total_records_indexed, len(self._index), self._total_files_scanned)
+            # Log with verification
+            if self._total_files_scanned > 0:
+                logging.info("✅✅✅ Index loaded from Azure: %d records, %d unique addresses, %d files - Ready to resume from file %d ✅✅✅",
+                           self._total_records_indexed, len(self._index), self._total_files_scanned, self._total_files_scanned)
+            else:
+                logging.info("✅ Index loaded from Azure: %d records, %d unique addresses, %d files",
+                           self._total_records_indexed, len(self._index), self._total_files_scanned)
             return True
         
         except Exception as e:
