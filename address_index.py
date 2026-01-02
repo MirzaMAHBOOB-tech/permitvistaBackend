@@ -323,18 +323,23 @@ class AddressIndex:
                             continue
                     
                     processed_files += 1
-                    self._total_files_scanned = processed_files
+                    # Update _total_files_scanned BEFORE checkpoint save to ensure it's saved correctly
+                    self._total_files_scanned = resume_from + processed_files
                     
                     # Save checkpoint at multiple intervals to prevent data loss on server restart
                     # Save at 4900 (before 5000) to avoid restart during save, and at 1000, 2000, 3000, 4000 for frequent backups
+                    # Also save every 500 files after 5000 for regular backups
                     checkpoint_intervals = [1000, 2000, 3000, 4000, 4900, 5000]
-                    if processed_files in checkpoint_intervals and self._use_azure_storage and self._azure_container and not self._saving:
+                    if self._total_files_scanned >= 5000 and self._total_files_scanned % 500 == 0:
+                        checkpoint_intervals.append(self._total_files_scanned)
+                    
+                    if self._total_files_scanned in checkpoint_intervals and self._use_azure_storage and self._azure_container and not self._saving:
                         try:
                             self._saving = True  # Prevent concurrent saves
                             # Estimate current index size
                             current_size_estimate = (self._total_records_indexed * 200) / (1024 * 1024)  # MB
                             logging.info("💾 Saving checkpoint at %d/%d files (%.1f%%) | Current index: ~%.1f MB...", 
-                                       processed_files, total_files, (processed_files/total_files*100), current_size_estimate)
+                                       self._total_files_scanned, total_files, (self._total_files_scanned/total_files*100), current_size_estimate)
                             
                             # Save with timing
                             save_start = time.time()
@@ -357,17 +362,17 @@ class AddressIndex:
                             self._saving = False  # Release save lock
                     
                     # Progress logging every 100 files
-                    if processed_files % 100 == 0 or processed_files == total_files:
+                    if processed_files % 100 == 0 or processed_files == (total_files - resume_from):
                         current_time = time.time()
                         elapsed = current_time - start_time
                         files_per_sec = processed_files / elapsed if elapsed > 0 else 0
-                        remaining_files = total_files - processed_files
+                        remaining_files = total_files - self._total_files_scanned
                         eta_seconds = remaining_files / files_per_sec if files_per_sec > 0 else 0
                         eta_minutes = eta_seconds / 60
-                        progress_pct = (processed_files / total_files * 100) if total_files > 0 else 0
+                        progress_pct = (self._total_files_scanned / total_files * 100) if total_files > 0 else 0
                         
                         logging.info("Index build progress: %d/%d files (%.1f%%) | %d records, %d unique addresses | ETA: %.1f minutes",
-                                   processed_files, total_files, progress_pct, self._total_records_indexed, len(self._index), eta_minutes)
+                                   self._total_files_scanned, total_files, progress_pct, self._total_records_indexed, len(self._index), eta_minutes)
                         if progress_callback:
                             progress_callback(processed_files, total_files)
                 
@@ -384,7 +389,7 @@ class AddressIndex:
             logging.info("=" * 80)
             logging.info("✅✅✅ ADDRESS INDEX BUILD COMPLETED SUCCESSFULLY! ✅✅✅")
             logging.info("   Duration: %.1f seconds (%.1f minutes)", build_duration, build_duration / 60)
-            logging.info("   Files indexed: %d / %d (100%%)", self._total_files_scanned, total_files)
+            logging.info("   Files indexed: %d / %d (%.1f%%)", self._total_files_scanned, total_files, (self._total_files_scanned/total_files*100) if total_files > 0 else 0)
             logging.info("   Records indexed: %d", self._total_records_indexed)
             logging.info("   Unique addresses: %d", len(self._index))
             logging.info("   Status: Index is now ready for fast searches!")
