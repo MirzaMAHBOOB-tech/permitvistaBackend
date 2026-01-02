@@ -704,6 +704,22 @@ def search(
                 if address_index.load_from_azure():
                     logging.info("✅ Index loaded from Azure - will use for this search")
                     index_has_data = len(address_index._index) > 0
+                    
+                    # Check if index is incomplete and continue building
+                    if index_has_data and address_index._total_files_scanned > 0:
+                        total_files_estimate = 55043  # Approximate total
+                        completion_pct = (address_index._total_files_scanned / total_files_estimate * 100) if total_files_estimate > 0 else 0
+                        if completion_pct < 100 and not address_index.is_loading():
+                            logging.info("📊 Index is incomplete: %d/%d files (%.1f%%) - continuing build in background...", 
+                                       address_index._total_files_scanned, total_files_estimate, completion_pct)
+                            def continue_index_build():
+                                try:
+                                    logging.info("🚀 Continuing index build from file %d - this will take several minutes...", address_index._total_files_scanned)
+                                    address_index.build_index_from_azure(src_container, max_files=INDEX_FILE_LIMIT if INDEX_FILE_LIMIT > 0 else None)
+                                    logging.info("✅✅✅ Index build completed successfully! All %d files indexed!", address_index._total_files_scanned)
+                                except Exception as e:
+                                    logging.exception("❌ Index build continuation failed: %s", e)
+                            threading.Thread(target=continue_index_build, daemon=True).start()
                 else:
                     # Index doesn't exist in Azure - trigger background build for future searches
                     logging.info("SEARCH index not found in Azure - triggering background index build")
@@ -733,6 +749,23 @@ def search(
         # Now check if we can use the index
         index_has_data = address_index.is_loaded() and len(address_index._index) > 0
         use_index = (ENABLE_INDEXING and not has_date_range and user_provided_structured and index_has_data)
+        
+        # If index is incomplete, continue building in background
+        if (index_has_data and ENABLE_INDEXING and not has_date_range 
+            and address_index._total_files_scanned > 0 and not address_index.is_loading()):
+            total_files_estimate = 55043  # Approximate total
+            completion_pct = (address_index._total_files_scanned / total_files_estimate * 100) if total_files_estimate > 0 else 0
+            if completion_pct < 100:
+                logging.info("📊 Index is incomplete: %d/%d files (%.1f%%) - continuing build in background...", 
+                           address_index._total_files_scanned, total_files_estimate, completion_pct)
+                def continue_index_build():
+                    try:
+                        logging.info("🚀 Continuing index build from file %d - this will take several minutes...", address_index._total_files_scanned)
+                        address_index.build_index_from_azure(src_container, max_files=INDEX_FILE_LIMIT if INDEX_FILE_LIMIT > 0 else None)
+                        logging.info("✅✅✅ Index build completed successfully! All %d files indexed!", address_index._total_files_scanned)
+                    except Exception as e:
+                        logging.exception("❌ Index build continuation failed: %s", e)
+                threading.Thread(target=continue_index_build, daemon=True).start()
         
         if not use_index and ENABLE_INDEXING and not has_date_range and user_provided_structured:
             if not address_index._use_azure_storage:
@@ -858,16 +891,28 @@ def search(
                     logging.warning("Error processing index match from %s row %d: %s", location.blob_name, location.row_index, e)
                     continue
             
-            # If using index and no matches found, return "not found"
-            dur_ms = int((time.perf_counter() - start_t) * 1000)
-            logging.info("SEARCH index lookup completed - no matches found | duration_ms=%d", dur_ms)
-            return JSONResponse({
-                "results": [],
-                "message": "Record not found. Your search data is not in records or the provided fields do not match exactly.",
-                "duration_ms": dur_ms,
-                "canonical_hit": True,
-                "index_used": True
-            })
+            # If using index and no matches found, check if index is incomplete
+            # If incomplete, fall back to full scan for this search
+            index_incomplete = (address_index._total_files_scanned > 0 and 
+                              address_index._total_files_scanned < 50000)  # Rough check for incomplete
+            if index_incomplete:
+                completion_pct = (address_index._total_files_scanned / 55043 * 100)
+                logging.info("⚠️ Index lookup found 0 matches, but index is incomplete (%d/55043 files, %.1f%%) - falling back to full scan", 
+                           address_index._total_files_scanned, completion_pct)
+                # Fall through to full scan below
+                use_index = False  # Disable index use, will use full scan
+            else:
+                # Index is complete (or nearly complete) - record truly not found
+                dur_ms = int((time.perf_counter() - start_t) * 1000)
+                logging.info("SEARCH index lookup completed - no matches found (index complete: %d files) | duration_ms=%d", 
+                           address_index._total_files_scanned, dur_ms)
+                return JSONResponse({
+                    "results": [],
+                    "message": "Record not found. Your search data is not in records or the provided fields do not match exactly.",
+                    "duration_ms": dur_ms,
+                    "canonical_hit": True,
+                    "index_used": True
+                })
         
         # ============================================================
         # SCANNING-BASED SEARCH (fallback when index not available)

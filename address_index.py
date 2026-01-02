@@ -260,8 +260,12 @@ class AddressIndex:
                                 continue
                             
                             # Normalize values (same as search logic)
+                            # Note: street_name from extract_record_address_components is already normalized
                             street_number = (street_number or "").strip()
                             street_name = (street_name or "").strip() if street_name else ""
+                            # Ensure street_name is normalized (extract_record_address_components should already normalize, but double-check)
+                            if street_name and _normalize_text:
+                                street_name = _normalize_text(street_name)
                             zip_code = (zip_code or "").strip()[:5] if zip_code else None
                             
                             # Create index key
@@ -435,17 +439,39 @@ class AddressIndex:
             else:
                 return []  # No index available
         
-        # Normalize inputs
+        # Normalize inputs (same as index build)
         street_number = (street_number or "").strip() if street_number else None
         street_name = (street_name or "").strip() if street_name else None
         zip_code = (zip_code or "").strip()[:5] if zip_code else None
         
+        # Normalize street_name using the same function as index build
+        if street_name and _normalize_text:
+            street_name = _normalize_text(street_name)
+        
         # Build lookup key
         index_key = (street_number or "", street_name or "", zip_code or None)
+        
+        # Debug logging
+        logging.debug("Index lookup key: street_number='%s' street_name='%s' zip='%s'", 
+                     street_number, street_name, zip_code)
         
         # Get all matches for this key
         with self._lock:
             matches = self._index.get(index_key, [])
+            # Also try partial matches if exact match fails
+            if not matches:
+                # Try without zip code
+                if zip_code:
+                    partial_key = (street_number or "", street_name or "", None)
+                    matches = self._index.get(partial_key, [])
+                    if matches:
+                        logging.debug("Index lookup: Found %d matches without zip code", len(matches))
+                # Try without street number
+                if not matches and street_number:
+                    partial_key = ("", street_name or "", zip_code or None)
+                    matches = self._index.get(partial_key, [])
+                    if matches:
+                        logging.debug("Index lookup: Found %d matches without street number", len(matches))
         
         # Apply filters
         filtered = []
