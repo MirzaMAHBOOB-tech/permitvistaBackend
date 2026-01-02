@@ -131,18 +131,24 @@ class AddressIndex:
         resume_from = 0
         if self._use_azure_storage and self._azure_container:
             try:
+                container_name = self._azure_container.container_name if hasattr(self._azure_container, 'container_name') else 'unknown'
+                logging.info("🔍 Checking for existing index in Azure container: %s/%s", container_name, self.INDEX_BLOB_NAME)
                 blob_client = self._azure_container.get_blob_client(self.INDEX_BLOB_NAME)
                 if blob_client.exists():
-                    # Load existing index to resume
-                    logging.info("🔄 Found existing index in Azure - loading to resume indexing...")
+                    # Get file info before loading
+                    props = blob_client.get_blob_properties()
+                    size_mb = props.size / (1024 * 1024)
+                    logging.info("🔄 Found existing index in Azure - Size: %.1f MB - Loading to resume indexing...", size_mb)
                     if self.load_from_azure():
                         resume_from = self._total_files_scanned
-                        logging.info("✅ Resuming index build from file %d (already indexed %d files, %d records)", 
+                        logging.info("✅✅✅ Resuming index build from file %d (already indexed %d files, %d records) ✅✅✅", 
                                    resume_from, self._total_files_scanned, self._total_records_indexed)
                     else:
-                        logging.info("Failed to load existing index - will start fresh")
+                        logging.warning("⚠️ Index file exists but failed to load - will start fresh")
+                else:
+                    logging.info("ℹ️ No existing index found in Azure - will start fresh indexing")
             except Exception as e:
-                logging.warning("Error checking for existing index: %s - will start fresh", e)
+                logging.exception("❌ Error checking for existing index: %s - will start fresh", e)
         
         try:
             logging.info("Starting address index build from Azure Blob Storage...")
@@ -303,14 +309,19 @@ class AddressIndex:
                             logging.info("💾 Saving checkpoint at %d/%d files (%.1f%%) | Current index: ~%.1f MB...", 
                                        processed_files, total_files, (processed_files/total_files*100), current_size_estimate)
                             self._save_to_azure()
-                            # Get actual saved size
+                            # Verify the file was actually saved
                             blob_client = self._azure_container.get_blob_client(self.INDEX_BLOB_NAME)
                             if blob_client.exists():
                                 props = blob_client.get_blob_properties()
                                 actual_size_mb = props.size / (1024 * 1024)
-                                logging.info("✅ Checkpoint saved successfully - Actual size: %.1f MB - index is safe even if server restarts", actual_size_mb)
+                                logging.info("✅✅✅ Checkpoint saved successfully - Actual size: %.1f MB - index is safe even if server restarts ✅✅✅", actual_size_mb)
+                                logging.info("✅ Checkpoint verification: File exists in Azure at %s/%s", 
+                                           self._azure_container.container_name if hasattr(self._azure_container, 'container_name') else 'container', 
+                                           self.INDEX_BLOB_NAME)
+                            else:
+                                logging.error("❌❌❌ CRITICAL: Checkpoint save reported success but file not found in Azure! Index may be lost on restart!")
                         except Exception as e:
-                            logging.error("❌ Failed to save checkpoint: %s - indexing will continue but progress may be lost on restart", e)
+                            logging.exception("❌❌❌ Failed to save checkpoint: %s - indexing will continue but progress may be lost on restart", e)
                     
                     # Progress logging every 100 files
                     if processed_files % 100 == 0 or processed_files == total_files:
@@ -480,14 +491,25 @@ class AddressIndex:
         pickle_data = pickle.dumps(index_data)
         
         # Upload to Azure
-        blob_client = self._azure_container.get_blob_client(self.INDEX_BLOB_NAME)
-        blob_client.upload_blob(pickle_data, overwrite=True)
-        size_mb = len(pickle_data) / (1024 * 1024)
-        size_gb = size_mb / 1024
-        if size_gb >= 1.0:
-            logging.info("Index saved to Azure: %s (%.2f GB, %d bytes)", self.INDEX_BLOB_NAME, size_gb, len(pickle_data))
-        else:
-            logging.info("Index saved to Azure: %s (%.1f MB, %d bytes)", self.INDEX_BLOB_NAME, size_mb, len(pickle_data))
+        try:
+            blob_client = self._azure_container.get_blob_client(self.INDEX_BLOB_NAME)
+            container_name = self._azure_container.container_name if hasattr(self._azure_container, 'container_name') else 'unknown'
+            logging.info("📤 Uploading index to Azure: %s/%s", container_name, self.INDEX_BLOB_NAME)
+            blob_client.upload_blob(pickle_data, overwrite=True)
+            
+            # Verify upload
+            if not blob_client.exists():
+                raise Exception("Upload reported success but file not found in Azure!")
+            
+            size_mb = len(pickle_data) / (1024 * 1024)
+            size_gb = size_mb / 1024
+            if size_gb >= 1.0:
+                logging.info("✅ Index saved to Azure: %s/%s (%.2f GB, %d bytes)", container_name, self.INDEX_BLOB_NAME, size_gb, len(pickle_data))
+            else:
+                logging.info("✅ Index saved to Azure: %s/%s (%.1f MB, %d bytes)", container_name, self.INDEX_BLOB_NAME, size_mb, len(pickle_data))
+        except Exception as e:
+            logging.exception("❌❌❌ CRITICAL ERROR saving index to Azure: %s", e)
+            raise  # Re-raise so caller knows save failed
     
     def load_from_azure(self) -> bool:
         """
