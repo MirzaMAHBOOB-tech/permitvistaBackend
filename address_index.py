@@ -72,6 +72,7 @@ class AddressIndex:
         self._total_files_scanned = 0
         self._use_azure_storage = False  # Will be set if Azure container is available
         self._azure_container = None  # Azure container for storing index
+        self._saving = False  # Flag to prevent concurrent saves
     
     def is_loaded(self) -> bool:
         """Check if index is fully loaded"""
@@ -301,27 +302,36 @@ class AddressIndex:
                     processed_files += 1
                     self._total_files_scanned = processed_files
                     
-                    # Save checkpoint every 5000 files to prevent data loss on server restart
-                    if processed_files % 5000 == 0 and self._use_azure_storage and self._azure_container:
+                    # Save checkpoint at multiple intervals to prevent data loss on server restart
+                    # Save at 4900 (before 5000) to avoid restart during save, and at 1000, 2000, 3000, 4000 for frequent backups
+                    checkpoint_intervals = [1000, 2000, 3000, 4000, 4900, 5000]
+                    if processed_files in checkpoint_intervals and self._use_azure_storage and self._azure_container and not self._saving:
                         try:
+                            self._saving = True  # Prevent concurrent saves
                             # Estimate current index size
                             current_size_estimate = (self._total_records_indexed * 200) / (1024 * 1024)  # MB
                             logging.info("💾 Saving checkpoint at %d/%d files (%.1f%%) | Current index: ~%.1f MB...", 
                                        processed_files, total_files, (processed_files/total_files*100), current_size_estimate)
+                            
+                            # Save with timing
+                            save_start = time.time()
                             self._save_to_azure()
+                            save_duration = time.time() - save_start
+                            
                             # Verify the file was actually saved
                             blob_client = self._azure_container.get_blob_client(self.INDEX_BLOB_NAME)
                             if blob_client.exists():
                                 props = blob_client.get_blob_properties()
                                 actual_size_mb = props.size / (1024 * 1024)
-                                logging.info("✅✅✅ Checkpoint saved successfully - Actual size: %.1f MB - index is safe even if server restarts ✅✅✅", actual_size_mb)
-                                logging.info("✅ Checkpoint verification: File exists in Azure at %s/%s", 
-                                           self._azure_container.container_name if hasattr(self._azure_container, 'container_name') else 'container', 
-                                           self.INDEX_BLOB_NAME)
+                                container_name = self._azure_container.container_name if hasattr(self._azure_container, 'container_name') else 'container'
+                                logging.info("✅✅✅ Checkpoint saved successfully in %.1f seconds - Actual size: %.1f MB ✅✅✅", save_duration, actual_size_mb)
+                                logging.info("✅ Checkpoint verification: File exists in Azure at %s/%s", container_name, self.INDEX_BLOB_NAME)
                             else:
                                 logging.error("❌❌❌ CRITICAL: Checkpoint save reported success but file not found in Azure! Index may be lost on restart!")
                         except Exception as e:
                             logging.exception("❌❌❌ Failed to save checkpoint: %s - indexing will continue but progress may be lost on restart", e)
+                        finally:
+                            self._saving = False  # Release save lock
                     
                     # Progress logging every 100 files
                     if processed_files % 100 == 0 or processed_files == total_files:
@@ -494,7 +504,8 @@ class AddressIndex:
         try:
             blob_client = self._azure_container.get_blob_client(self.INDEX_BLOB_NAME)
             container_name = self._azure_container.container_name if hasattr(self._azure_container, 'container_name') else 'unknown'
-            logging.info("📤 Uploading index to Azure: %s/%s", container_name, self.INDEX_BLOB_NAME)
+            size_mb = len(pickle_data) / (1024 * 1024)
+            logging.info("📤 Uploading index to Azure: %s/%s (%.1f MB)...", container_name, self.INDEX_BLOB_NAME, size_mb)
             blob_client.upload_blob(pickle_data, overwrite=True)
             
             # Verify upload
