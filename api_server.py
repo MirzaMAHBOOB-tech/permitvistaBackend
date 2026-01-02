@@ -91,7 +91,10 @@ OUTPUT_CONTAINER = os.getenv("OUTPUT_CONTAINER")
 SAMPLE_PERMIT_LIMIT = int(os.getenv("SAMPLE_PERMIT_LIMIT", "1000"))
 MAX_CSV_FILES = int(os.getenv("MAX_CSV_FILES", "100"))
 # Enable/disable indexing (set to "false" to disable indexing and save memory)
+# ENABLE_INDEXING: Enable address indexing for fast searches (default: true)
+# Set to "false" to disable indexing and always use full scan
 ENABLE_INDEXING = os.getenv("ENABLE_INDEXING", "true").lower() == "true"
+logging.info("🔧 Indexing system: ENABLE_INDEXING=%s (from env: %s)", ENABLE_INDEXING, os.getenv("ENABLE_INDEXING", "not set"))
 # Limit index to recent files only (set to number of files, e.g., "10000" for last 10k files)
 INDEX_FILE_LIMIT = int(os.getenv("INDEX_FILE_LIMIT", "0"))  # 0 = index all files
 
@@ -698,10 +701,11 @@ def search(
                     logging.info("SEARCH index not found in Azure - triggering background index build")
                     def build_index_background():
                         try:
+                            logging.info("🚀 Background index build started - this will take several minutes...")
                             address_index.build_index_from_azure(src_container, max_files=INDEX_FILE_LIMIT if INDEX_FILE_LIMIT > 0 else None)
-                            logging.info("✅ Index build complete and saved to Azure - future searches will be fast!")
+                            logging.info("✅✅✅ Background index build completed successfully! Future searches will be fast (1-5 seconds instead of 15+ minutes)!")
                         except Exception as e:
-                            logging.exception("Background index build failed: %s", e)
+                            logging.exception("❌ Background index build failed: %s", e)
                     threading.Thread(target=build_index_background, daemon=True).start()
         else:
             # Log why index loading is being skipped

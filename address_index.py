@@ -258,7 +258,7 @@ class AddressIndex:
             
             build_duration = (datetime.now() - self._build_start_time).total_seconds()
             logging.info("=" * 80)
-            logging.info("✅ ADDRESS INDEX BUILD COMPLETED SUCCESSFULLY!")
+            logging.info("✅✅✅ ADDRESS INDEX BUILD COMPLETED SUCCESSFULLY! ✅✅✅")
             logging.info("   Duration: %.1f seconds (%.1f minutes)", build_duration, build_duration / 60)
             logging.info("   Files indexed: %d / %d (100%%)", self._total_files_scanned, total_files)
             logging.info("   Records indexed: %d", self._total_records_indexed)
@@ -269,12 +269,16 @@ class AddressIndex:
             # Save index to Azure Storage and clear from memory to save RAM
             if self._use_azure_storage and self._azure_container:
                 try:
+                    logging.info("💾 Saving index to Azure Blob Storage...")
                     self._save_to_azure()
-                    logging.info("✅ Index saved to Azure Blob Storage: %s", self.INDEX_BLOB_NAME)
+                    logging.info("✅✅✅ Index saved to Azure Blob Storage: %s ✅✅✅", self.INDEX_BLOB_NAME)
                     # Keep index in memory for fast lookups
                     # Index is saved to Azure for persistence across server restarts
                     # Memory usage is acceptable for performance benefits
-                    logging.info("Index saved to Azure and kept in memory for fast lookups")
+                    logging.info("✅ Index kept in memory for fast lookups")
+                    logging.info("=" * 80)
+                    logging.info("🎉🎉🎉 INDEXING COMPLETE - ALL FUTURE SEARCHES WILL BE FAST! 🎉🎉🎉")
+                    logging.info("=" * 80)
                 except Exception as e:
                     logging.warning("Failed to save index to Azure: %s", e)
                     raise  # Re-raise so index stays in memory if save fails
