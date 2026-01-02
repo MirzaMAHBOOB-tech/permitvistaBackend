@@ -6,6 +6,7 @@ Builds index from Azure Blob Storage CSV files and saves to Azure.
 """
 import logging
 import threading
+import time
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 from datetime import datetime
@@ -126,12 +127,41 @@ class AddressIndex:
             self._loading = True
             self._build_start_time = datetime.now()
         
+        # Check if partial index exists and resume from there (outside lock to avoid deadlock)
+        resume_from = 0
+        if self._use_azure_storage and self._azure_container:
+            try:
+                blob_client = self._azure_container.get_blob_client(self.INDEX_BLOB_NAME)
+                if blob_client.exists():
+                    # Load existing index to resume
+                    logging.info("🔄 Found existing index in Azure - loading to resume indexing...")
+                    if self.load_from_azure():
+                        resume_from = self._total_files_scanned
+                        logging.info("✅ Resuming index build from file %d (already indexed %d files, %d records)", 
+                                   resume_from, self._total_files_scanned, self._total_records_indexed)
+                    else:
+                        logging.info("Failed to load existing index - will start fresh")
+            except Exception as e:
+                logging.warning("Error checking for existing index: %s - will start fresh", e)
+        
         try:
             logging.info("Starting address index build from Azure Blob Storage...")
             
             # Verify extraction functions are set
             if not _extract_record_address_components:
                 raise RuntimeError("Extraction functions not set. Call set_extraction_functions() first.")
+            
+            # Check Azure storage availability and estimate space needed
+            if self._use_azure_storage and self._azure_container:
+                try:
+                    # Test if we can write to the container (checks storage availability)
+                    test_blob_name = f"_index_test_{int(time.time())}.tmp"
+                    test_blob_client = self._azure_container.get_blob_client(test_blob_name)
+                    test_blob_client.upload_blob(b"test", overwrite=True)
+                    test_blob_client.delete_blob()
+                    logging.info("✅ Azure storage write test successful - storage is accessible")
+                except Exception as e:
+                    logging.warning("⚠️ Azure storage write test failed: %s - indexing will continue but may fail on save", e)
             
             # List all CSV files
             all_csv_files = []
@@ -142,6 +172,22 @@ class AddressIndex:
             
             total_files = len(all_csv_files)
             logging.info("Found %d CSV files to index", total_files)
+            
+            # Estimate index size (rough calculation: ~200 bytes per record on average)
+            # This is conservative - actual size may be smaller due to compression in pickle
+            estimated_records = total_files * 150  # Average 150 records per file
+            estimated_size_mb = (estimated_records * 200) / (1024 * 1024)  # ~200 bytes per record
+            estimated_size_gb = estimated_size_mb / 1024
+            
+            logging.info("📊 Estimated index size: ~%.1f MB (%.2f GB) for %d files", 
+                        estimated_size_mb, estimated_size_gb, total_files)
+            
+            if estimated_size_gb > 1.0:
+                logging.warning("⚠️ Large index estimated (%.2f GB) - ensure Azure storage has sufficient space", estimated_size_gb)
+            elif estimated_size_mb > 500:
+                logging.info("ℹ️ Index size will be approximately %.1f MB - ensure Azure storage has sufficient space", estimated_size_mb)
+            else:
+                logging.info("✅ Estimated index size (%.1f MB) is reasonable", estimated_size_mb)
             
             # Extract date from path for sorting (newest first)
             def extract_date_from_path(path):
@@ -169,12 +215,21 @@ class AddressIndex:
                            len(all_csv_files), original_count)
                 total_files = len(all_csv_files)  # Update total_files to reflect limit
             
+            # Skip files that were already indexed (resume functionality)
+            if resume_from > 0 and resume_from < len(all_csv_files):
+                all_csv_files = all_csv_files[resume_from:]
+                logging.info("⏩ Skipping %d already-indexed files, continuing from file %d", resume_from, resume_from + 1)
+                total_files = len(all_csv_files) + resume_from  # Total includes already indexed
+            
             # Import pandas here to avoid circular dependency
             import pandas as pd
             from io import BytesIO
             
             # Scan each CSV file
-            processed_files = 0
+            processed_files = resume_from  # Start from resume point
+            start_time = time.time()
+            last_progress_time = start_time
+            
             for csv_file_name in all_csv_files:
                 try:
                     # Read CSV from Azure
@@ -240,10 +295,35 @@ class AddressIndex:
                     processed_files += 1
                     self._total_files_scanned = processed_files
                     
+                    # Save checkpoint every 5000 files to prevent data loss on server restart
+                    if processed_files % 5000 == 0 and self._use_azure_storage and self._azure_container:
+                        try:
+                            # Estimate current index size
+                            current_size_estimate = (self._total_records_indexed * 200) / (1024 * 1024)  # MB
+                            logging.info("💾 Saving checkpoint at %d/%d files (%.1f%%) | Current index: ~%.1f MB...", 
+                                       processed_files, total_files, (processed_files/total_files*100), current_size_estimate)
+                            self._save_to_azure()
+                            # Get actual saved size
+                            blob_client = self._azure_container.get_blob_client(self.INDEX_BLOB_NAME)
+                            if blob_client.exists():
+                                props = blob_client.get_blob_properties()
+                                actual_size_mb = props.size / (1024 * 1024)
+                                logging.info("✅ Checkpoint saved successfully - Actual size: %.1f MB - index is safe even if server restarts", actual_size_mb)
+                        except Exception as e:
+                            logging.error("❌ Failed to save checkpoint: %s - indexing will continue but progress may be lost on restart", e)
+                    
                     # Progress logging every 100 files
                     if processed_files % 100 == 0 or processed_files == total_files:
-                        logging.info("Index build progress: %d/%d files processed, %d records indexed, %d unique addresses",
-                                   processed_files, total_files, self._total_records_indexed, len(self._index))
+                        current_time = time.time()
+                        elapsed = current_time - start_time
+                        files_per_sec = processed_files / elapsed if elapsed > 0 else 0
+                        remaining_files = total_files - processed_files
+                        eta_seconds = remaining_files / files_per_sec if files_per_sec > 0 else 0
+                        eta_minutes = eta_seconds / 60
+                        progress_pct = (processed_files / total_files * 100) if total_files > 0 else 0
+                        
+                        logging.info("Index build progress: %d/%d files (%.1f%%) | %d records, %d unique addresses | ETA: %.1f minutes",
+                                   processed_files, total_files, progress_pct, self._total_records_indexed, len(self._index), eta_minutes)
                         if progress_callback:
                             progress_callback(processed_files, total_files)
                 
@@ -402,7 +482,12 @@ class AddressIndex:
         # Upload to Azure
         blob_client = self._azure_container.get_blob_client(self.INDEX_BLOB_NAME)
         blob_client.upload_blob(pickle_data, overwrite=True)
-        logging.info("Index saved to Azure: %s (%d bytes)", self.INDEX_BLOB_NAME, len(pickle_data))
+        size_mb = len(pickle_data) / (1024 * 1024)
+        size_gb = size_mb / 1024
+        if size_gb >= 1.0:
+            logging.info("Index saved to Azure: %s (%.2f GB, %d bytes)", self.INDEX_BLOB_NAME, size_gb, len(pickle_data))
+        else:
+            logging.info("Index saved to Azure: %s (%.1f MB, %d bytes)", self.INDEX_BLOB_NAME, size_mb, len(pickle_data))
     
     def load_from_azure(self) -> bool:
         """
