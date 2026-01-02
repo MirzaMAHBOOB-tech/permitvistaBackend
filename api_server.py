@@ -620,6 +620,13 @@ def search(
     route_norm = route_norm or normalize_text(input_addr)
     city_norm = normalize_text(city or "")
 
+    # Extract structured fields from main address if not provided in query params
+    # This allows index to be used even when structured fields aren't explicitly sent
+    # Use query params if provided, otherwise use extracted values
+    effective_street_number = street_number_q or street_number
+    effective_street_name = street_name_q or (route_norm if route_norm else None)
+    effective_zip = zip_q or zip_code
+
     # Build canonical address key from provided structured parts (if any)
     google_main = input_addr.split(",")[0].strip()
     if street_number_q or street_name_q or street_type_q or street_dir_q:
@@ -633,7 +640,7 @@ def search(
             google_main = rebuilt
     # Canonical key tuple for input
     in_num, in_tokens = canonicalize_address_main(google_main)
-    zip_from_google = (zip_q or "").strip() or (extract_address_components(input_addr)[2] or "")
+    zip_from_google = effective_zip or ""
 
     # utility: normalize the main street portion (before the first comma)
     def main_street_part(s: str) -> str:
@@ -675,7 +682,8 @@ def search(
                 all_csv_files.append(name)
         
         # Check if we should use index: no date range + structured fields + index available
-        user_provided_structured = bool(street_number_q or street_name_q or zip_q)
+        # effective_street_number, effective_street_name, effective_zip are already defined above
+        user_provided_structured = bool(effective_street_number or effective_street_name or effective_zip)
         
         # Debug: Log index status
         logging.info("SEARCH index check | ENABLE_INDEXING=%s has_date_range=%s user_provided_structured=%s is_loading=%s has_azure_storage=%s is_loaded=%s index_size=%d",
@@ -741,10 +749,10 @@ def search(
             logging.info("SEARCH ✅ USING INDEX - Fast lookup mode (index has %d unique addresses, %d total records)", 
                        len(address_index._index), address_index._total_records_indexed)
             
-            # Extract user's address components (same as structured matching logic)
-            user_street_number = (street_number_q or "").strip() if street_number_q else None
-            user_street_name = normalize_text(street_name_q or "") if street_name_q else None
-            user_zip = (zip_q or "").strip() if zip_q else None
+            # Extract user's address components (use query params or extracted from main address)
+            user_street_number = (effective_street_number or "").strip() if effective_street_number else None
+            user_street_name = normalize_text(effective_street_name or "") if effective_street_name else None
+            user_zip = (effective_zip or "").strip() if effective_zip else None
             
             # Look up in index
             index_matches = address_index.lookup(
