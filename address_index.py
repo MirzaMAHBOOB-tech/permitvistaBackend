@@ -106,9 +106,23 @@ class AddressIndex:
                       Useful for memory-constrained environments (e.g., index only last 10k files)
         """
         with self._lock:
-            if self._loaded and len(self._index) > 0:
-                logging.info("Address index already loaded in memory (%d records), skipping build", self._total_records_indexed)
+            # Check if index is complete (all files indexed)
+            # If index is loaded but incomplete, we should continue building
+            total_files_estimate = 55043  # Approximate total CSV files
+            is_complete = (self._total_files_scanned >= total_files_estimate or 
+                          (max_files and self._total_files_scanned >= max_files))
+            
+            if self._loaded and len(self._index) > 0 and is_complete:
+                logging.info("Address index already complete in memory (%d records, %d files), skipping build", 
+                           self._total_records_indexed, self._total_files_scanned)
                 return
+            
+            # If index is loaded but incomplete, continue building
+            if self._loaded and len(self._index) > 0 and not is_complete:
+                completion_pct = (self._total_files_scanned / total_files_estimate * 100) if total_files_estimate > 0 else 0
+                logging.info("📊 Index is loaded but incomplete: %d/%d files (%.1f%%) - will continue building from file %d", 
+                           self._total_files_scanned, total_files_estimate, completion_pct, self._total_files_scanned)
+                # Don't return - continue to build logic below
             # If index is marked as loaded but empty, try to reload from Azure first
             if self._loaded and len(self._index) == 0 and self._use_azure_storage and self._azure_container:
                 logging.info("Index marked as loaded but empty - attempting to reload from Azure before rebuilding")
@@ -140,12 +154,17 @@ class AddressIndex:
                     props = blob_client.get_blob_properties()
                     size_mb = props.size / (1024 * 1024)
                     logging.info("🔄 Found existing index in Azure - Size: %.1f MB - Loading to resume indexing...", size_mb)
-                    if self.load_from_azure():
-                        resume_from = self._total_files_scanned
-                        logging.info("✅✅✅ Resuming index build from file %d (already indexed %d files, %d records) ✅✅✅", 
-                                   resume_from, self._total_files_scanned, self._total_records_indexed)
+                    # Only load if not already loaded, or if loaded but we need to check resume point
+                    if not (self._loaded and len(self._index) > 0):
+                        if self.load_from_azure():
+                            resume_from = self._total_files_scanned
+                            logging.info("✅✅✅ Resuming index build from file %d (already indexed %d files, %d records) ✅✅✅", 
+                                       resume_from, self._total_files_scanned, self._total_records_indexed)
                     else:
-                        logging.warning("⚠️ Index file exists but failed to load - will start fresh")
+                        # Already loaded - use current _total_files_scanned as resume point
+                        resume_from = self._total_files_scanned
+                        logging.info("✅✅✅ Continuing index build from file %d (already indexed %d files, %d records) ✅✅✅", 
+                                   resume_from, self._total_files_scanned, self._total_records_indexed)
                 else:
                     logging.info("ℹ️ No existing index found in Azure - will start fresh indexing")
             except Exception as e:
