@@ -23,8 +23,8 @@ import secrets
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-# ----------------- Address Index Import -----------------
-from address_index import AddressIndex, set_extraction_functions
+# ----------------- Database Import -----------------
+import pyodbc
 
 # ----------------- Token Management for Privacy -----------------
 # Store token -> permit_id mapping (with expiration)
@@ -90,13 +90,12 @@ SRC_CONTAINER = os.getenv("SRC_CONTAINER")
 OUTPUT_CONTAINER = os.getenv("OUTPUT_CONTAINER")
 SAMPLE_PERMIT_LIMIT = int(os.getenv("SAMPLE_PERMIT_LIMIT", "1000"))
 MAX_CSV_FILES = int(os.getenv("MAX_CSV_FILES", "100"))
-# Enable/disable indexing (set to "false" to disable indexing and save memory)
-# ENABLE_INDEXING: Enable address indexing for fast searches (default: true)
-# Set to "false" to disable indexing and always use full scan
-ENABLE_INDEXING = os.getenv("ENABLE_INDEXING", "true").lower() == "true"
-logging.info("🔧 Indexing system: ENABLE_INDEXING=%s (from env: %s)", ENABLE_INDEXING, os.getenv("ENABLE_INDEXING", "not set"))
-# Limit index to recent files only (set to number of files, e.g., "10000" for last 10k files)
-INDEX_FILE_LIMIT = int(os.getenv("INDEX_FILE_LIMIT", "0"))  # 0 = index all files
+
+# ----------------- Database Configuration -----------------
+DB_SERVER = os.getenv("DB_SERVER", "permitvista-db.database.windows.net")
+DB_DATABASE = os.getenv("DB_DATABASE", "free-sql-db-7590410")
+DB_USER = os.getenv("DB_USER", "permitvistaadmin")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
 # ----------------- FastAPI app -----------------
 app = FastAPI(title="Permit Certificates", docs_url=None, redoc_url=None)
@@ -138,38 +137,43 @@ else:
 
 ID_CANDIDATES = ["PermitNumber", "PermitNum", "_id", "ID", "OBJECTID", "FID", "ApplicationNumber"]
 
-# ----------------- Address Index Initialization -----------------
-address_index = AddressIndex()
-# Set extraction functions for the index (called after functions are defined)
-_index_initialized = False
+# ----------------- Database Connection Helper -----------------
+def get_db_connection():
+    """Create and return a database connection"""
+    if not DB_PASSWORD:
+        raise ValueError("DB_PASSWORD environment variable is required")
+    
+    connection_string = (
+        f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+        f"SERVER={DB_SERVER};"
+        f"DATABASE={DB_DATABASE};"
+        f"UID={DB_USER};"
+        f"PWD={DB_PASSWORD};"
+        f"Encrypt=yes;"
+        f"TrustServerCertificate=no;"
+        f"Connection Timeout=30;"
+    )
+    
+    try:
+        conn = pyodbc.connect(connection_string)
+        return conn
+    except pyodbc.Error as e:
+        logging.exception("Database connection failed: %s", e)
+        raise
 
-def _initialize_address_index():
-    """Initialize address index with extraction functions and load from Azure if available"""
-    global _index_initialized
-    logging.info("🔧 Initializing address index system...")
-    if not _index_initialized:
-        set_extraction_functions(
-            extract_record_address_components,
-            normalize_text,
-            pick_id_from_record
-        )
-        _index_initialized = True
-        logging.info("✅ Address index extraction functions registered")
-        
-        # Set Azure storage for index persistence (use pdf_container)
-        if pdf_container:
-            address_index.set_azure_storage(pdf_container)
-            logging.info("✅ Address index will use Azure Storage for persistence: %s/%s", 
-                       OUTPUT_CONTAINER, address_index.INDEX_BLOB_NAME)
-            # Try to load existing index from Azure on startup
-            if address_index.load_from_azure():
-                logging.info("✅ Address index loaded from Azure Storage on startup - ready for fast searches!")
-            else:
-                logging.info("ℹ️ No existing index found in Azure - will build and save on first search")
-        else:
-            logging.warning("⚠️ Azure storage (pdf_container) not available - indexing disabled (ENABLE_INDEXING will be ignored)")
+def get_table_name(city: Optional[str]) -> List[str]:
+    """Determine which table(s) to query based on city parameter"""
+    city_lower = (city or "").strip().lower()
+    
+    if "tampa" in city_lower:
+        return ["dbo.permits"]
+    elif "miami" in city_lower:
+        return ["dbo.miami_permits"]
+    elif "orlando" in city_lower:
+        return ["dbo.orlando_permits"]
     else:
-        logging.info("Address index already initialized")
+        # If no city specified, search all tables
+        return ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
 
 # ----------------- Helpers -----------------
 def _read_csv_bytes_from_blob(container_client, blob_name: str) -> Optional[pd.DataFrame]:
@@ -492,29 +496,18 @@ def canonicalize_address_main(s: str) -> Tuple[str, List[str]]:
         rest_norm.insert(0, d)
     return street_num, rest_norm
 
-# Initialize address index after all helper functions are defined
-_initialize_address_index()
+# Database connection test on startup
+try:
+    if DB_PASSWORD:
+        test_conn = get_db_connection()
+        test_conn.close()
+        logging.info("✅ Database connection successful: %s/%s", DB_SERVER, DB_DATABASE)
+    else:
+        logging.warning("⚠️ DB_PASSWORD not set - database queries will fail")
+except Exception as e:
+    logging.warning("⚠️ Database connection test failed: %s - queries will fail at runtime", e)
 
 # ----------------- Endpoints -----------------
-@app.get("/index-status")
-def index_status():
-    """Get current status of the address index"""
-    stats = address_index.get_stats()
-    total_files = 55043  # Approximate total CSV files
-    if stats["loading"]:
-        progress_pct = (stats["total_files"] / total_files * 100) if total_files > 0 else 0
-        status_msg = f"Indexing in progress: {stats['total_files']}/{total_files} files ({progress_pct:.1f}%)"
-    elif stats["loaded"]:
-        status_msg = f"Index complete: {stats['total_files']} files, {stats['total_records']} records, {stats['unique_addresses']} unique addresses"
-    else:
-        status_msg = "Index not started"
-    
-    return JSONResponse({
-        "status": "loading" if stats["loading"] else ("loaded" if stats["loaded"] else "not_started"),
-        "message": status_msg,
-        "stats": stats,
-        "total_files_estimated": total_files
-    })
 
 @app.get("/health")
 def health():
@@ -588,7 +581,6 @@ def search(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     max_results: int = Query(200),
-    scan_limit: Optional[int] = Query(None, description="Override number of CSV blobs to scan (bounds 1..5000)"),
     permit: Optional[str] = Query(None, description="Optional permit number to match after address"),
     street_number_q: Optional[str] = Query(None, description="Optional street number from Google selection"),
     street_name_q: Optional[str] = Query(None, description="Optional street name from Google selection"),
@@ -597,664 +589,131 @@ def search(
     zip_q: Optional[str] = Query(None, description="Optional zip code from Google selection")
 ):
     """
-    Search records by address primarily. 'address' is required.
-    Matching strategy:
-     - try to extract street number, route (normalized), and zip from the provided address
-     - for each CSV record, normalize address-like fields and attempt to match:
-         * if zip is present in input, require zip match (strong)
-         * if street number present, prefer records whose normalized address starts with that number
-         * route (street name) is tested as substring on normalized forms
-     - optional 'city', 'date_from', 'date_to' are applied as filters
+    Search records by address using database query.
+    Queries the SQL Server database using LIKE '%ADDRESS%' on SearchAddress column.
     """
+    start_t = time.perf_counter()
     results: List[dict] = []
-    if not src_container:
-        return JSONResponse({"results": [], "error": "SRC_CONTAINER not configured"})
-
-    # Normalize input and extract heuristics
+    
+    # Validate address parameter
     input_addr = (address or "").strip()
     if not input_addr:
-        # Query(...) already enforces presence, but double-check
         raise HTTPException(status_code=400, detail="address parameter required")
-
-    street_number, route_norm, zip_code = extract_address_components(input_addr)
-    route_norm = route_norm or normalize_text(input_addr)
-    city_norm = normalize_text(city or "")
-
-    # Extract structured fields from main address if not provided in query params
-    # This allows index to be used even when structured fields aren't explicitly sent
-    # Use query params if provided, otherwise use extracted values
-    effective_street_number = street_number_q or street_number
-    effective_street_name = street_name_q or (route_norm if route_norm else None)
-    effective_zip = zip_q or zip_code
-
-    # Build canonical address key from provided structured parts (if any)
-    google_main = input_addr.split(",")[0].strip()
-    if street_number_q or street_name_q or street_type_q or street_dir_q:
-        # Build "dir street_name street_type" with direction first, like AddressDescription style
-        dir_tok = normalize_dir(street_dir_q or "")
-        type_tok = normalize_suffix(street_type_q or "")
-        name_tok = normalize_text(street_name_q or "")
-        number_tok = (street_number_q or "").strip()
-        rebuilt = " ".join(t for t in [number_tok, dir_tok, name_tok, type_tok] if t).strip()
-        if rebuilt:
-            google_main = rebuilt
-    # Canonical key tuple for input
-    in_num, in_tokens = canonicalize_address_main(google_main)
-    zip_from_google = effective_zip or ""
-
-    # utility: normalize the main street portion (before the first comma)
-    def main_street_part(s: str) -> str:
-        if not s:
-            return ""
-        part = s.split(",")[0].strip()
-        # remove unit/apt markers at end
-        part = re.sub(r"\b(?:a\/b|apt|unit|ste|suite|#|fl|floor|lot)\b[\w\s\-\/]*$", "", part, flags=re.IGNORECASE).strip()
-        # drop trailing one-letter cardinal directions (N,S,E,W)
-        part = re.sub(r"\b(N|S|E|W)\b\.?$", "", part, flags=re.IGNORECASE).strip()
-        return normalize_text(part)
-
-    # Log incoming search intent
-    logging.info("SEARCH start | address='%s' city='%s' permit='%s' dates=%s..%s max=%s scan_limit=%s | google_parts num=%s name_tokens=%s zip=%s",
-                 input_addr, city, permit, date_from, date_to, max_results, scan_limit, in_num, in_tokens, zip_from_google)
-
-    start_t = time.perf_counter()
-    tries = 0
-    seen_ids: set = set()
-    canonical_hit = True
-
+    
+    # Get database connection
     try:
-        # If user provided date range, use scan_limit for performance
-        # If no date range, scan ALL files until exact match found
-        has_date_range = bool(date_from or date_to)
-        if has_date_range:
-            scan_max = min(max(1, int(scan_limit or MAX_CSV_FILES)), 5000)
-            logging.info("SEARCH date range provided - using scan_limit=%d", scan_max)
-        else:
-            # No date range - scan ALL files until match found
-            scan_max = 999999  # Effectively unlimited
-            logging.info("SEARCH no date range - will scan ALL files until exact match found")
-        
-        # List all CSV files available in Azure (needed for both index and scanning)
-        all_csv_files = []
-        for blob in src_container.list_blobs():
-            name = getattr(blob, "name", str(blob))
-            if name.lower().endswith(".csv"):
-                all_csv_files.append(name)
-        
-        # Check if we should use index: no date range + structured fields + index available
-        # effective_street_number, effective_street_name, effective_zip are already defined above
-        user_provided_structured = bool(effective_street_number or effective_street_name or effective_zip)
-        
-        # Debug: Log index status
-        logging.info("SEARCH index check | ENABLE_INDEXING=%s has_date_range=%s user_provided_structured=%s is_loading=%s has_azure_storage=%s is_loaded=%s index_size=%d",
-                    ENABLE_INDEXING, has_date_range, user_provided_structured, 
-                    address_index.is_loading(), address_index._use_azure_storage, 
-                    address_index.is_loaded(), len(address_index._index))
-        
-        # First, try to ensure index is loaded if it exists in Azure
-        # Only if indexing is enabled and Azure storage is available
-        if (ENABLE_INDEXING and not has_date_range and user_provided_structured
-            and not address_index.is_loading() and src_container and address_index._use_azure_storage):
-            # Check if index is loaded AND has data in memory
-            index_has_data = address_index.is_loaded() and len(address_index._index) > 0
-            
-            if not index_has_data:
-                # Try to load from Azure (synchronously, so we can use it for this search)
-                logging.info("SEARCH index not in memory - attempting to load from Azure")
-                if address_index.load_from_azure():
-                    logging.info("✅ Index loaded from Azure - will use for this search")
-                    index_has_data = len(address_index._index) > 0
-                    
-                    # Check if index is incomplete and continue building
-                    if index_has_data and address_index._total_files_scanned > 0:
-                        total_files_estimate = 55043  # Approximate total
-                        completion_pct = (address_index._total_files_scanned / total_files_estimate * 100) if total_files_estimate > 0 else 0
-                        if completion_pct < 100 and not address_index.is_loading():
-                            logging.info("📊 Index is incomplete: %d/%d files (%.1f%%) - continuing build in background...", 
-                                       address_index._total_files_scanned, total_files_estimate, completion_pct)
-                            def continue_index_build():
-                                try:
-                                    logging.info("🚀 Continuing index build from file %d - this will take several minutes...", address_index._total_files_scanned)
-                                    address_index.build_index_from_azure(src_container, max_files=INDEX_FILE_LIMIT if INDEX_FILE_LIMIT > 0 else None)
-                                    logging.info("✅✅✅ Index build completed successfully! All %d files indexed!", address_index._total_files_scanned)
-                                except Exception as e:
-                                    logging.exception("❌ Index build continuation failed: %s", e)
-                            threading.Thread(target=continue_index_build, daemon=True).start()
-                else:
-                    # Index doesn't exist in Azure - trigger background build for future searches
-                    logging.info("SEARCH index not found in Azure - triggering background index build")
-                    def build_index_background():
-                        try:
-                            logging.info("🚀 Background index build started - this will take several minutes...")
-                            address_index.build_index_from_azure(src_container, max_files=INDEX_FILE_LIMIT if INDEX_FILE_LIMIT > 0 else None)
-                            logging.info("✅✅✅ Background index build completed successfully! Future searches will be fast (1-5 seconds instead of 15+ minutes)!")
-                        except Exception as e:
-                            logging.exception("❌ Background index build failed: %s", e)
-                    threading.Thread(target=build_index_background, daemon=True).start()
-        else:
-            # Log why index loading is being skipped
-            if not ENABLE_INDEXING:
-                logging.info("SEARCH index loading skipped: ENABLE_INDEXING=false")
-            elif has_date_range:
-                logging.info("SEARCH index loading skipped: date range provided")
-            elif not user_provided_structured:
-                logging.info("SEARCH index loading skipped: no structured address fields provided")
-            elif address_index.is_loading():
-                logging.info("SEARCH index loading skipped: index is currently being built")
-            elif not src_container:
-                logging.info("SEARCH index loading skipped: src_container not available")
-            elif not address_index._use_azure_storage:
-                logging.info("SEARCH index loading skipped: Azure storage not configured for index")
-        
-        # Now check if we can use the index
-        index_has_data = address_index.is_loaded() and len(address_index._index) > 0
-        use_index = (ENABLE_INDEXING and not has_date_range and user_provided_structured and index_has_data)
-        
-        # If index is incomplete, continue building in background
-        if (index_has_data and ENABLE_INDEXING and not has_date_range 
-            and address_index._total_files_scanned > 0 and not address_index.is_loading()):
-            total_files_estimate = 55043  # Approximate total
-            completion_pct = (address_index._total_files_scanned / total_files_estimate * 100) if total_files_estimate > 0 else 0
-            if completion_pct < 100:
-                logging.info("📊 Index is incomplete: %d/%d files (%.1f%%) - continuing build in background...", 
-                           address_index._total_files_scanned, total_files_estimate, completion_pct)
-                def continue_index_build():
-                    try:
-                        logging.info("🚀 Continuing index build from file %d - this will take several minutes...", address_index._total_files_scanned)
-                        address_index.build_index_from_azure(src_container, max_files=INDEX_FILE_LIMIT if INDEX_FILE_LIMIT > 0 else None)
-                        logging.info("✅✅✅ Index build completed successfully! All %d files indexed!", address_index._total_files_scanned)
-                    except Exception as e:
-                        logging.exception("❌ Index build continuation failed: %s", e)
-                threading.Thread(target=continue_index_build, daemon=True).start()
-        
-        if not use_index and ENABLE_INDEXING and not has_date_range and user_provided_structured:
-            if not address_index._use_azure_storage:
-                logging.info("SEARCH Azure storage not available - indexing disabled - using full scan")
-            elif address_index.is_loading():
-                logging.info("SEARCH index is currently being built - using full scan for this request")
-            else:
-                logging.info("SEARCH index not available - using full scan (index may be building in background)")
-        
-        # ============================================================
-        # INDEX-BASED SEARCH (fast path when index is loaded from Azure)
-        # ============================================================
-        if use_index:
-            logging.info("SEARCH ✅ USING INDEX - Fast lookup mode (index has %d unique addresses, %d total records)", 
-                       len(address_index._index), address_index._total_records_indexed)
-            
-            # Extract user's address components (use query params or extracted from main address)
-            user_street_number = (effective_street_number or "").strip() if effective_street_number else None
-            user_street_name = normalize_text(effective_street_name or "") if effective_street_name else None
-            user_zip = (effective_zip or "").strip() if effective_zip else None
-            
-            # Look up in index
-            index_matches = address_index.lookup(
-                street_number=user_street_number,
-                street_name=user_street_name,
-                zip_code=user_zip,
-                date_from=date_from,
-                date_to=date_to,
-                permit=permit,
-                city=city
-            )
-            
-            logging.info("SEARCH index lookup found %d candidate records", len(index_matches))
-            
-            # Process each match from index (works for both full and partial index)
-            for location in index_matches:
-                try:
-                    # Read the specific CSV file and row
-                    df = _read_csv_bytes_from_blob(src_container, location.blob_name)
-                    if df is None:
-                        continue
-                    
-                    # Get the specific row
-                    if location.row_index >= len(df):
-                        continue
-                    
-                    row = df.iloc[location.row_index]
-                    rec = {k.strip(): ("" if pd.isna(v) else str(v)) for k, v in row.items()}
-                    
-                    # Apply same matching logic as scanning (double-check address match)
-                    rec_street_number, rec_street_name, rec_zip = extract_record_address_components(rec)
-                    
-                    address_matched = True
-                    
-                    # Street number check
-                    if user_street_number:
-                        if not rec_street_number or user_street_number != rec_street_number:
-                            address_matched = False
-                    
-                    # Street name check
-                    if address_matched and user_street_name:
-                        if not rec_street_name or user_street_name.strip() != rec_street_name.strip():
-                            address_matched = False
-                    
-                    # ZIP check
-                    if address_matched and user_zip:
-                        user_zip_clean = user_zip[:5]
-                        if not rec_zip or user_zip_clean != rec_zip[:5]:
-                            address_matched = False
-                    
-                    if not address_matched:
-                        continue
-                    
-                    # City filter (if provided)
-                    if city_norm:
-                        rec_city = normalize_text(rec.get("OriginalCity") or rec.get("City") or "")
-                        if city_norm not in rec_city:
-                            continue
-                    
-                    # Permit filter (if provided)
-                    if permit:
-                        p = (permit or "").strip().lower()
-                        rec_p = (rec.get("PermitNum") or rec.get("PermitNumber") or "").strip().lower()
-                        if not rec_p or p != rec_p:
-                            continue
-                    
-                    # Date filter (if provided - already filtered by index, but double-check)
-                    appl = rec.get("AppliedDate", "")
-                    if date_from and appl and appl < date_from:
-                        continue
-                    if date_to and appl and appl > date_to:
-                        continue
-                    
-                    # All checks passed - generate PDF and return
-                    rec_id = pick_id_from_record(rec)
-                    try:
-                        pdf_path = generate_pdf_from_template(rec, str(TEMPLATES_DIR / "certificate-placeholder.html"))
-                        token = create_token_for_permit(rec_id)
-                        view_url = f"/view/{token}"
-                        download_url = f"/download/{token}.pdf"
-                        logging.info("SEARCH index match - PDF generated | id=%s blob=%s token=%s", rec_id, location.blob_name, token[:8])
-                        dur_ms = int((time.perf_counter() - start_t) * 1000)
-                        return JSONResponse({
-                            "results": [rec],
-                            "view_url": view_url,
-                            "download_url": download_url,
-                            "duration_ms": dur_ms,
-                            "canonical_hit": True,
-                            "index_used": True
-                        })
-                    except HTTPException as he:
-                        logging.exception("PDF generation failed during index search for id=%s: %s", rec_id, he)
-                        dur_ms = int((time.perf_counter() - start_t) * 1000)
-                        return JSONResponse({
-                            "results": [rec],
-                            "pdf_error": str(he.detail),
-                            "duration_ms": dur_ms,
-                            "canonical_hit": True,
-                            "index_used": True
-                        })
-                
-                except Exception as e:
-                    logging.warning("Error processing index match from %s row %d: %s", location.blob_name, location.row_index, e)
-                    continue
-            
-            # If using index and no matches found, check if index is incomplete
-            # If incomplete, fall back to full scan for this search
-            index_incomplete = (address_index._total_files_scanned > 0 and 
-                              address_index._total_files_scanned < 50000)  # Rough check for incomplete
-            if index_incomplete:
-                completion_pct = (address_index._total_files_scanned / 55043 * 100)
-                logging.info("⚠️ Index lookup found 0 matches, but index is incomplete (%d/55043 files, %.1f%%) - falling back to full scan", 
-                           address_index._total_files_scanned, completion_pct)
-                # Fall through to full scan below
-                use_index = False  # Disable index use, will use full scan
-            else:
-                # Index is complete (or nearly complete) - record truly not found
-                dur_ms = int((time.perf_counter() - start_t) * 1000)
-                logging.info("SEARCH index lookup completed - no matches found (index complete: %d files) | duration_ms=%d", 
-                           address_index._total_files_scanned, dur_ms)
-                return JSONResponse({
-                    "results": [],
-                    "message": "Record not found. Your search data is not in records or the provided fields do not match exactly.",
-                    "duration_ms": dur_ms,
-                    "canonical_hit": True,
-                    "index_used": True
-                })
-        
-        # ============================================================
-        # SCANNING-BASED SEARCH (fallback when index not available)
-        # ============================================================
-        # Note: all_csv_files is already defined above
-        
-        scanned = 0  # Initialize scanned counter for scanning loop
-        
-        # Extract date from filename or path for filtering and sorting
-        # Files are typically in format: YYYY/MM/DD/tampa_permits_YYYYMMDD_*.csv
-        def extract_date_from_path(path):
-            """Extract date from path like '2023/05/05/tampa_permits_20230505_*.csv'
-            Returns (year, month, day) tuple or (0, 0, 0) if not found"""
-            parts = path.split('/')
-            if len(parts) >= 3:
-                try:
-                    year = int(parts[0])
-                    month = int(parts[1])
-                    day = int(parts[2])
-                    return (year, month, day)
-                except (ValueError, IndexError):
-                    pass
-            # Fallback: try to extract from filename
-            import re
-            date_match = re.search(r'(\d{4})(\d{2})(\d{2})', path)
-            if date_match:
-                return (int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3)))
-            return (0, 0, 0)  # Put files without dates at the end
-        
-        def date_tuple_to_string(date_tuple):
-            """Convert (year, month, day) to 'YYYY-MM-DD' string"""
-            year, month, day = date_tuple
-            if year == 0:
-                return None
-            return f"{year:04d}-{month:02d}-{day:02d}"
-        
-        # If user provided date range, filter CSV files to only those within the range
-        if date_from or date_to:
-            logging.info("SEARCH date range provided | date_from=%s date_to=%s - filtering CSV files", date_from, date_to)
-            filtered_csv_files = []
-            for csv_file in all_csv_files:
-                file_date_tuple = extract_date_from_path(csv_file)
-                file_date_str = date_tuple_to_string(file_date_tuple)
-                
-                if file_date_str is None:
-                    # File has no date - include it (better safe than sorry)
-                    filtered_csv_files.append(csv_file)
-                    continue
-                
-                # Check if file date is within range
-                include_file = True
-                if date_from and file_date_str < date_from:
-                    include_file = False
-                if date_to and file_date_str > date_to:
-                    include_file = False
-                
-                if include_file:
-                    filtered_csv_files.append(csv_file)
-            
-            original_count = len(all_csv_files)
-            all_csv_files = filtered_csv_files
-            logging.info("SEARCH date range filter | filtered from %d to %d CSV files", original_count, len(all_csv_files))
-        
-        # Sort by date descending (newest first) - this ensures recent records are found first
-        all_csv_files.sort(key=extract_date_from_path, reverse=True)
-        
-        logging.info("SEARCH Azure scan | total_csv_files=%d scan_limit=%d", len(all_csv_files), scan_max)
-        if len(all_csv_files) > 0 and len(all_csv_files) <= 20:
-            logging.info("SEARCH CSV files in Azure (newest first): %s", all_csv_files[:20])
-        elif len(all_csv_files) > 20:
-            logging.info("SEARCH CSV files in Azure (newest first, first 20): %s", all_csv_files[:20])
-            logging.info("SEARCH ... and %d more CSV files", len(all_csv_files) - 20)
-        
-        # Now scan the CSV files (already sorted newest first)
-        # If no date range provided, scan ALL files until match found (no limit)
-        # If date range provided, respect scan_max limit
-        files_to_scan = all_csv_files if not (date_from or date_to) else all_csv_files[:scan_max]
-        actual_scan_limit = len(all_csv_files) if not (date_from or date_to) else scan_max
-        
-        if not (date_from or date_to):
-            logging.info("SEARCH no date range provided - will scan ALL %d files until match found", len(all_csv_files))
-        else:
-            logging.info("SEARCH date range provided - will scan up to %d files", scan_max)
-        
-        scanned_file_names = set()  # Track which files we've scanned
-        for csv_file_name in files_to_scan:
-            if csv_file_name in scanned_file_names:
-                continue
-            scanned_file_names.add(csv_file_name)
-            
-            # Get blob by name
-            try:
-                blob_client = src_container.get_blob_client(csv_file_name)
-                if not blob_client.exists():
-                    logging.warning("CSV file not found in Azure: %s", csv_file_name)
-                    continue
-            except Exception as e:
-                logging.warning("Error checking blob %s: %s", csv_file_name, e)
-                continue
-            
-            name = csv_file_name
-            # Only enforce scan limit if date range was provided
-            if (date_from or date_to) and scanned >= scan_max:
-                logging.info("Reached scan limit during search (%d)", scan_max)
-                break
-
-            df = _read_csv_bytes_from_blob(src_container, name)
-            scanned += 1
-            if df is None:
-                continue
-            try:
-                df_len = len(df)
-            except Exception:
-                df_len = -1
-            
-            # Log progress every 100 files (to avoid log spam when scanning all files)
-            if scanned % 100 == 0 or scanned <= 20:
-                total_to_scan = len(files_to_scan) if not (date_from or date_to) else scan_max
-                logging.info("Scanning blob %d/%s: %s rows=%s", scanned, total_to_scan if (date_from or date_to) else "ALL", name, df_len if df_len >= 0 else "?")
-
-            for _, row in df.iterrows():
-                rec = {k.strip(): ("" if pd.isna(v) else str(v)) for k, v in row.items()}
-
-                # City filter (if provided) - OK to check early
-                if city_norm:
-                    rec_city = normalize_text(rec.get("OriginalCity") or rec.get("City") or "")
-                    if city_norm not in rec_city:
-                        continue
-
-                # ============================================================
-                # STEP 1: ADDRESS MATCHING (REQUIRED - must match exactly)
-                # ============================================================
-                user_provided_structured = bool(street_number_q or street_name_q or zip_q)
-                address_matched = False
-                matched_by = ""
-                
-                if user_provided_structured:
-                    # STRICT FIELD-BASED MATCHING: All provided fields must match exactly
-                    user_street_number = (street_number_q or "").strip() if street_number_q else None
-                    user_street_name = normalize_text(street_name_q or "") if street_name_q else None
-                    user_zip = (zip_q or "").strip() if zip_q else None
-
-                    rec_street_number, rec_street_name, rec_zip = extract_record_address_components(rec)
-
-                    address_matched = True
-                    matched_by = "field_match"
-
-                    # 1️⃣ Street number check (EXACT match required if provided)
-                    if user_street_number:
-                        if not rec_street_number or user_street_number != rec_street_number:
-                            address_matched = False
-                            logging.debug(f"Street number mismatch: user='{user_street_number}' vs rec='{rec_street_number}'")
-
-                    # 2️⃣ Street name check (EXACT match required if provided)
-                    if address_matched and user_street_name:
-                        if not rec_street_name:
-                            address_matched = False
-                            logging.debug("Street name check failed: record has no street name")
-                        else:
-                            # EXACT matching: normalized street names must be identical
-                            # No partial/prefix matching - must match exactly
-                            # Compare as strings (already normalized)
-                            if user_street_name.strip() != rec_street_name.strip():
-                                address_matched = False
-                                logging.debug(f"[MATCH] Street name EXACT mismatch: user='{user_street_name}' vs rec='{rec_street_name}' (blob={name})")
-                            else:
-                                logging.debug(f"[MATCH] Street name matched: '{user_street_name}' == '{rec_street_name}' (blob={name})")
-
-                    # 3️⃣ ZIP validation (EXACT match required if provided)
-                    if address_matched and user_zip:
-                        user_zip_clean = user_zip[:5]
-                        if not rec_zip or user_zip_clean != rec_zip[:5]:
-                            address_matched = False
-                            logging.debug(f"[MATCH] ZIP mismatch: user='{user_zip_clean}' vs rec='{rec_zip[:5] if rec_zip else None}' (blob={name})")
-                        else:
-                            logging.debug(f"[MATCH] ZIP matched: '{user_zip_clean}' == '{rec_zip[:5]}' (blob={name})")
-
-                    # If structured fields provided but don't match, skip this record (no fallback)
-                    if not address_matched:
-                        logging.debug(f"[MATCH] Address mismatch - skipping record (blob={name}, OriginalAddress1={rec.get('OriginalAddress1', 'N/A')[:50]})")
-                        continue
-                    else:
-                        logging.info(f"[MATCH] Address matched! (blob={name}, OriginalAddress1={rec.get('OriginalAddress1', 'N/A')[:50]})")
-
-                else:
-                    # No structured fields provided - use fallback scoring-based matching
-                    # Build normalized candidate addresses from record
-                    rec_addrs = record_address_values(rec)
-                    if not rec_addrs:
-                        continue
-
-                    # scoring-based match
-                    input_norm = normalize_text(input_addr)
-                    route_tokens = (route_norm or "").split()
-                    input_main = main_street_part(input_addr)
-
-                    # Prefer exact AddressDescription-style canonical equality if available
-                    rec_addrdesc = rec.get("AddressDescription") or ""
-                    if rec_addrdesc:
-                        rec_num, rec_tokens = canonicalize_address_main(rec_addrdesc)
-                        if in_num and rec_num and in_num == rec_num and rec_tokens and in_tokens:
-                            if set(rec_tokens) == set(in_tokens):
-                                address_matched = True
-                                matched_by = "addrdesc_canonical"
-
-                    # helper: count token matches between route tokens and candidate tokens
-                    def token_match_count(tokens, cand_tokens):
-                        c = 0
-                        for t in tokens:
-                            if not t: 
-                                continue
-                            for ct in cand_tokens:
-                                if ct.startswith(t) or ct == t:
-                                    c += 1
-                                    break
-                        return c
-
-                    for cand in rec_addrs:
-                        score = 0
-
-                        # street number alignment helps
-                        if street_number and (cand.startswith(street_number + " ") or cand.startswith(street_number + "-") or cand.startswith(street_number + ",")):
-                            score += 2
-
-                        # route tokens overlap
-                        if route_tokens:
-                            cand_tokens = cand.split()
-                            count = token_match_count(route_tokens, cand_tokens)
-                            required = 1 if len(route_tokens) == 1 else min(2, len(route_tokens))
-                            if count >= required:
-                                score += 2
-
-                        # main-part (before comma) equality/containment
-                        cand_main = main_street_part(cand)
-                        if input_main and cand_main:
-                            if cand_main == input_main:
-                                score += 3
-                            elif cand_main.startswith(input_main) or input_main.startswith(cand_main):
-                                score += 2
-
-                        # substring fallback
-                        if input_norm and input_norm in cand:
-                            score += 1
-
-                        if score >= 3:
-                            address_matched = True
-                            if not matched_by:
-                                matched_by = "score"
-                            break
-
-                # If address doesn't match, skip this record
-                if not address_matched:
-                    continue
-
-                # ============================================================
-                # STEP 2: PERMIT NUMBER MATCHING (if provided, must match exactly)
-                # ============================================================
-                if permit:
-                    p = (permit or "").strip().lower()
-                    rec_p = (rec.get("PermitNum") or rec.get("PermitNumber") or "").strip().lower()
-                    if not rec_p or p != rec_p:
-                        # Address matched but permit did not - skip this record
-                        logging.debug(f"Permit mismatch: user='{p}' vs rec='{rec_p}'")
-                        continue
-
-                # ============================================================
-                # STEP 3: DATE RANGE MATCHING (if provided, must match exactly)
-                # ============================================================
-                # Date filters are checked AFTER address and permit match
-                appl = rec.get("AppliedDate", "")
-                if date_from and appl:
-                    if appl < date_from:
-                        logging.debug(f"Date range mismatch: AppliedDate='{appl}' < date_from='{date_from}'")
-                        continue
-                if date_to and appl:
-                    if appl > date_to:
-                        logging.debug(f"Date range mismatch: AppliedDate='{appl}' > date_to='{date_to}'")
-                        continue
-
-                # ============================================================
-                # STEP 4: ALL CHECKS PASSED - Generate PDF
-                # ============================================================
-                # If we reached here, address matched (and permit/date if provided)
-                # Generate PDF immediately and return
-                rec_id = pick_id_from_record(rec)
-                try:
-                    pdf_path = generate_pdf_from_template(rec, str(TEMPLATES_DIR / "certificate-placeholder.html"))
-                    # Use token instead of permit_id in URL for privacy
-                    token = create_token_for_permit(rec_id)
-                    view_url = f"/view/{token}"
-                    download_url = f"/download/{token}.pdf"
-                    logging.info("SEARCH early-return PDF generated | id=%s blob=%s token=%s", rec_id, name, token[:8])
-                    dur_ms = int((time.perf_counter() - start_t) * 1000)
-                    return JSONResponse({
-                        "results": [rec],
-                        "view_url": view_url,
-                        "download_url": download_url,
-                        "duration_ms": dur_ms,
-                        "canonical_hit": matched_by == "addrdesc_canonical"
-                    })
-                except HTTPException as he:
-                    logging.exception("PDF generation failed during search for id=%s: %s", rec_id, he)
-                    dur_ms = int((time.perf_counter() - start_t) * 1000)
-                    return JSONResponse({
-                        "results": [rec],
-                        "pdf_error": str(he.detail),
-                        "duration_ms": dur_ms,
-                        "canonical_hit": matched_by == "addrdesc_canonical"
-                    })
+        conn = get_db_connection()
     except Exception as e:
-        logging.exception("Search error: %s", e)
-        # Return whatever found so far plus error note
-        return JSONResponse({"results": results, "error": str(e)})
-
-    # Optionally: sort results by AppliedDate descending if present
+        logging.exception("Database connection failed: %s", e)
+        return JSONResponse({"results": [], "error": f"Database connection failed: {str(e)}"})
+    
     try:
-        results_sorted = sorted(results, key=lambda r: r.get("AppliedDate") or "", reverse=True)
-    except Exception:
-        results_sorted = results
-
-    # Add view_url and download_url (with tokens) to all results for privacy
-    for rec in results_sorted:
-        if "view_url" not in rec and "download_url" not in rec:
+        # Determine which table(s) to query based on city
+        tables = get_table_name(city)
+        logging.info("SEARCH start | address='%s' city='%s' permit='%s' dates=%s..%s max=%s tables=%s",
+                     input_addr, city, permit, date_from, date_to, max_results, tables)
+        
+        all_results = []
+        cursor = conn.cursor()
+        
+        # Query each table
+        for table in tables:
+            try:
+                # Build SQL query with LIKE on SearchAddress column
+                query_parts = [f"SELECT TOP {max_results} * FROM {table} WHERE SearchAddress LIKE ?"]
+                params = [f"%{input_addr}%"]
+                
+                # Add permit filter if provided
+                if permit:
+                    # Common permit column names
+                    permit_cols = ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
+                    # Try to detect column name by querying table structure
+                    try:
+                        cursor.execute(f"SELECT TOP 1 * FROM {table}")
+                        columns = [column[0] for column in cursor.description]
+                        permit_col = None
+                        for col in permit_cols:
+                            if col in columns:
+                                permit_col = col
+                                break
+                        if permit_col:
+                            query_parts.append(f"AND {permit_col} = ?")
+                            params.append(permit)
+                    except:
+                        pass  # If detection fails, skip permit filter
+                
+                # Add date filters if provided
+                date_col = None
+                if date_from or date_to:
+                    try:
+                        cursor.execute(f"SELECT TOP 1 * FROM {table}")
+                        columns = [column[0] for column in cursor.description]
+                        for col in ["AppliedDate", "ApplicationDate", "DateApplied", "Date"]:
+                            if col in columns:
+                                date_col = col
+                                break
+                    except:
+                        pass
+                
+                if date_from and date_col:
+                    query_parts.append(f"AND {date_col} >= ?")
+                    params.append(date_from)
+                
+                if date_to and date_col:
+                    query_parts.append(f"AND {date_col} <= ?")
+                    params.append(date_to)
+                
+                query = " ".join(query_parts)
+                
+                logging.info("Executing query: %s with params: %s", query, params)
+                cursor.execute(query, params)
+                
+                # Fetch all results and convert to dict
+                columns = [column[0] for column in cursor.description]
+                for row in cursor.fetchall():
+                    rec = {col: (str(val) if val is not None else "") for col, val in zip(columns, row)}
+                    all_results.append(rec)
+                
+                logging.info("Found %d results from table %s", len(all_results), table)
+                
+            except Exception as e:
+                logging.exception("Error querying table %s: %s", table, e)
+                continue
+        
+        # Process results
+        for rec in all_results[:max_results]:
             rec_id = pick_id_from_record(rec)
-            if rec_id:
+            try:
+                pdf_path = generate_pdf_from_template(rec, str(TEMPLATES_DIR / "certificate-placeholder.html"))
                 token = create_token_for_permit(rec_id)
                 rec["view_url"] = f"/view/{token}"
                 rec["download_url"] = f"/download/{token}.pdf"
-
-    dur_ms = int((time.perf_counter() - start_t) * 1000)
-    logging.info("SEARCH done | results=%d canonical_hit=%s duration_ms=%d", len(results_sorted), canonical_hit, dur_ms)
-    
-    # If no results found, return "record not found" message
-    if len(results_sorted) == 0:
-        return JSONResponse({
-            "results": [],
-            "message": "Record not found. Your search data is not in records or the provided fields do not match exactly.",
-            "duration_ms": dur_ms,
-            "canonical_hit": canonical_hit
-        })
-    
-    return JSONResponse({"results": results_sorted, "duration_ms": dur_ms, "canonical_hit": canonical_hit})
+                results.append(rec)
+            except HTTPException as he:
+                logging.exception("PDF generation failed for id=%s: %s", rec_id, he)
+                rec["pdf_error"] = str(he.detail)
+                results.append(rec)
+            except Exception as e:
+                logging.exception("Error processing record %s: %s", rec_id, e)
+                continue
+        
+        dur_ms = int((time.perf_counter() - start_t) * 1000)
+        logging.info("SEARCH done | results=%d duration_ms=%d", len(results), dur_ms)
+        
+        if len(results) == 0:
+            return JSONResponse({
+                "results": [],
+                "message": "Record not found. Your search data is not in records or the provided fields do not match exactly.",
+                "duration_ms": dur_ms
+            })
+        
+        return JSONResponse({"results": results, "duration_ms": dur_ms})
+        
+    except Exception as e:
+        logging.exception("Search error: %s", e)
+        return JSONResponse({"results": [], "error": str(e)})
+    finally:
+        conn.close()
 
 # ---------- NEW: record endpoint now generates PDF only if record exists ----------
 @app.get("/record")
@@ -1352,7 +811,7 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
                 "address": property_address,
                 "city": record.get("OriginalCity", "") or record.get("City", "") or record.get("PropertyCity", "N/A"),
                 "state": record.get("OriginalState") or record.get("State", ""),
-                "zip_code": record.get("OriginalZip") or record.get("ZipCode") or "",
+                "zip_code": record.get("OriginalZip") or record.get("ZipCode", ""),
                 "pin": record.get("PIN", "")
             },
             "status_current": record.get("StatusCurrent", ""),
@@ -1448,6 +907,7 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
         logging.exception("PDF generation failed: %s", e)
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
 
+# ----------------- PDF generation, view and download endpoints -----------------
 @app.get("/view/{token}")
 def view_pdf(token: str):
     # Look up permit_id from token

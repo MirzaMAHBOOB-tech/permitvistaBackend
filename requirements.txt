@@ -7,3 +7,4 @@ pandas
 python-slugify
 azure-storage-blob
 python-multipart
+pyodbc
