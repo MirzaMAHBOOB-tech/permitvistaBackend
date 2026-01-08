@@ -148,8 +148,6 @@ DB_QUERY_TIMEOUT = int(os.getenv("DB_QUERY_TIMEOUT", "30"))
 DB_MAX_RETRIES = int(os.getenv("DB_MAX_RETRIES", "3"))
 DB_RETRY_DELAY = float(os.getenv("DB_RETRY_DELAY", "1.0"))
 
-# Database optimization settings
-DB_ENABLE_INDEXES = os.getenv("DB_ENABLE_INDEXES", "true").lower() == "true"
 
 # Thread-safe connection pool
 _db_pool: Optional[Queue] = None
@@ -220,72 +218,6 @@ def _is_connection_alive(conn) -> bool:
     except:
         return False
 
-def ensure_address_indexes():
-    """Create indexes on address columns if they don't exist"""
-    if not DB_ENABLE_INDEXES:
-        logging.info("Database indexing disabled via DB_ENABLE_INDEXES=false")
-        return
-
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-
-            # Tables to index
-            tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
-
-            for table in tables:
-                try:
-                    # Check if table exists
-                    cursor.execute("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = ?", (table.split('.')[1],))
-                    if not cursor.fetchone():
-                        continue
-
-                    # Address columns to index
-                    address_cols = ["SearchAddress", "OriginalAddress1", "AddressDescription", "Address", "OriginalAddress", "StreetAddress", "PropertyAddress"]
-
-                    for col in address_cols:
-                        try:
-                            # Check if index exists
-                            cursor.execute("""
-                                SELECT i.name
-                                FROM sys.indexes i
-                                INNER JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-                                INNER JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-                                WHERE i.object_id = OBJECT_ID(?)
-                                AND c.name = ?
-                                AND i.type_desc != 'HEAP'
-                            """, (table, col))
-
-                            if cursor.fetchone():
-                                logging.debug("Index already exists for %s.%s", table, col)
-                                continue
-
-                            # Check if column exists and has data
-                            cursor.execute(f"SELECT TOP 1 {col} FROM {table} WHERE {col} IS NOT NULL AND LEN({col}) > 0")
-                            if not cursor.fetchone():
-                                logging.debug("Column %s.%s has no data, skipping index", table, col)
-                                continue
-
-                            # Create index (non-unique, non-clustered)
-                            index_name = f"idx_{table.split('.')[1]}_{col.lower()}"
-                            create_sql = f"CREATE NONCLUSTERED INDEX {index_name} ON {table}({col})"
-
-                            logging.info("Creating index: %s", create_sql)
-                            cursor.execute(create_sql)
-                            conn.commit()
-
-                        except Exception as e:
-                            logging.warning("Failed to create index for %s.%s: %s", table, col, str(e))
-                            continue
-
-                except Exception as e:
-                    logging.warning("Error processing table %s: %s", table, str(e))
-                    continue
-
-            logging.info("Database indexing check completed")
-
-    except Exception as e:
-        logging.error("Error in ensure_address_indexes: %s", str(e))
 
 @contextmanager
 def get_db_connection():
@@ -670,16 +602,13 @@ def canonicalize_address_main(s: str) -> Tuple[str, List[str]]:
         rest_norm.insert(0, d)
     return street_num, rest_norm
 
-# Database connection test on startup and index creation
+# Database connection test on startup
 try:
     if DB_PASSWORD:
         with get_db_connection() as test_conn:
             # Connection is automatically returned to pool
             pass
         logging.info("✅ Database connection successful: %s/%s", DB_SERVER, DB_DATABASE)
-
-        # Ensure address indexes exist
-        ensure_address_indexes()
     else:
         logging.warning("⚠️ DB_PASSWORD not set - database queries will fail")
 except Exception as e:
@@ -780,115 +709,6 @@ def get_my_ip():
             "message": "Could not determine IP address"
         })
 
-@app.get("/debug-addresses")
-def debug_addresses(table: str = Query("dbo.permits"), limit: int = Query(10)):
-    """Debug endpoint to see what addresses exist in the database"""
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-
-            # Get sample addresses from the table
-            query = f"""
-                SELECT TOP {limit}
-                    SearchAddress, OriginalAddress1, AddressDescription, Address,
-                    OriginalAddress, StreetAddress, PropertyAddress
-                FROM {table}
-                WHERE (SearchAddress IS NOT NULL AND LEN(SearchAddress) > 0)
-                   OR (OriginalAddress1 IS NOT NULL AND LEN(OriginalAddress1) > 0)
-                   OR (AddressDescription IS NOT NULL AND LEN(AddressDescription) > 0)
-            """
-
-            cursor.execute(query)
-            columns = [column[0] for column in cursor.description]
-            results = []
-
-            for row in cursor.fetchall():
-                rec = {col: (str(val) if val is not None else "") for col, val in zip(columns, row)}
-                results.append(rec)
-
-            return JSONResponse({
-                "table": table,
-                "sample_addresses": results,
-                "total_samples": len(results)
-            })
-
-    except Exception as e:
-        return JSONResponse({
-            "error": str(e),
-            "table": table
-        })
-
-@app.get("/test-address-search")
-def test_address_search(address: str = Query(...), table: str = Query("dbo.permits")):
-    """Test if an address exists in the database"""
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-
-            # Parse the address like the search function does
-            street_num, route_text, zip_code = extract_address_components(address)
-
-            # Try the same search patterns
-            search_patterns = []
-
-            if street_num and route_text:
-                base_search = f"{street_num} {route_text}"
-                search_patterns.append(f"%{base_search}%")
-
-                # Try with directions
-                for direction in ['N', 'S', 'E', 'W']:
-                    dir_search = f"{street_num} {direction} {route_text}"
-                    search_patterns.append(f"%{dir_search}%")
-
-            if zip_code:
-                search_patterns.append(f"%{zip_code}%")
-
-            # Test each pattern
-            results = []
-            for pattern in search_patterns[:5]:  # Limit patterns
-                query = f"""
-                    SELECT TOP 5
-                        SearchAddress, OriginalAddress1, AddressDescription, PermitNumber
-                    FROM {table}
-                    WHERE SearchAddress LIKE ?
-                       OR OriginalAddress1 LIKE ?
-                       OR AddressDescription LIKE ?
-                       OR Address LIKE ?
-                """
-
-                cursor.execute(query, (pattern, pattern, pattern, pattern))
-                matches = cursor.fetchall()
-
-                if matches:
-                    results.append({
-                        "pattern": pattern,
-                        "matches": [
-                            {
-                                "SearchAddress": row[0],
-                                "OriginalAddress1": row[1],
-                                "AddressDescription": row[2],
-                                "PermitNumber": row[3]
-                            } for row in matches
-                        ]
-                    })
-
-            return JSONResponse({
-                "address": address,
-                "parsed": {
-                    "street_number": street_num,
-                    "route_text": route_text,
-                    "zip_code": zip_code
-                },
-                "search_patterns_tested": search_patterns[:5],
-                "results": results
-            })
-
-    except Exception as e:
-        return JSONResponse({
-            "error": str(e),
-            "address": address,
-            "table": table
-        })
 
 @app.get("/facets")
 def facets(field: str = Query(...), max_items: int = Query(200)):
@@ -1138,7 +958,7 @@ def search(
                     # Build and execute query
                     query = f"SELECT TOP {max_results} * FROM {table} WHERE {' '.join(where_parts)}"
 
-                    logging.info("Executing optimized query on %s: %s", table, query[:200] + "..." if len(query) > 200 else query)
+                    logging.info("Executing query on %s: %s", table, query[:200] + "..." if len(query) > 200 else query)
                     logging.debug("Query params: %s", params)
 
                     query_start = time.perf_counter()
@@ -1153,7 +973,7 @@ def search(
                         table_results.append(rec)
                         all_results.append(rec)
 
-                    logging.info("Found %d results from table %s in %.2fms", len(table_results), table, query_time * 1000)
+                    logging.info("Found %d results from table %s", len(table_results), table)
                     
                 except Exception as e:
                     logging.exception("Error querying table %s: %s", table, e)
