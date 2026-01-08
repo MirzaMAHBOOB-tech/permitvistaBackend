@@ -818,6 +818,23 @@ def search(
                         street_type_q = route_parts[-1]
                 if zip_code:
                     zip_q = zip_code
+
+            # Validation: require at least some search criteria to prevent overly broad searches
+            has_address_criteria = street_number_q or street_name_q
+            has_zip_criteria = zip_q is not None
+            has_permit_criteria = permit is not None
+            has_date_criteria = date_from or date_to
+
+            if not (has_address_criteria or has_zip_criteria or has_permit_criteria):
+                logging.warning("Search rejected: no meaningful search criteria provided")
+                return JSONResponse({
+                    "results": [],
+                    "message": "Please provide at least street name/number, postal code, or permit number for search.",
+                    "duration_ms": 0
+                })
+
+            logging.info("Search criteria: address=%s, zip=%s, permit=%s, date_range=%s-%s",
+                        has_address_criteria, has_zip_criteria, has_permit_criteria, date_from, date_to)
             
             # Query each table
             for table in tables:
@@ -836,87 +853,98 @@ def search(
                         logging.warning("No address columns found in table %s", table)
                         continue
 
-                    # SIMPLIFIED AND MORE DIRECT SEARCH STRATEGY
-                    address_conditions = []
-                    address_params = []
+                    # STRICT SEARCH CONDITIONS - STEP BY STEP FILTERING
+                    where_parts = []
+                    params = []
 
-                    logging.info("Search components: street_number='%s', street_name='%s', zip='%s'",
-                                street_number_q, street_name_q, zip_q)
-
-                    # Strategy 1: Direct component search (most efficient)
+                    # Step 1: Address matching - must contain both street number AND street name
                     if street_number_q and street_name_q:
-                        # Primary search: "506 Lincoln" or "506 N Lincoln"
-                        base_search = f"{street_number_q} {street_name_q}"
+                        logging.info("Searching for street_number='%s' AND street_name='%s' in same address field",
+                                    street_number_q, street_name_q)
 
-                        # Build condition for all address columns
-                        pattern_conditions = []
-                        for addr_col in address_cols:
-                            pattern_conditions.append(f"{addr_col} LIKE ?")
-                            address_params.append(f"%{base_search}%")
-                        if pattern_conditions:
-                            address_conditions.append(f"({' OR '.join(pattern_conditions)})")
+                        # Build patterns that require both components in the same field
+                        address_patterns = []
 
-                        # Also try with common directions if no street_dir_q provided
+                        # Primary: "506 Lincoln"
+                        base_pattern = f"{street_number_q} {street_name_q}"
+                        address_patterns.append(base_pattern)
+
+                        # With direction if provided: "506 N Lincoln"
+                        if street_dir_q:
+                            dir_pattern = f"{street_number_q} {street_dir_q} {street_name_q}"
+                            address_patterns.append(dir_pattern)
+
+                        # Try common directions if no direction specified
                         if not street_dir_q:
-                            for direction in ['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW']:
-                                dir_search = f"{street_number_q} {direction} {street_name_q}"
-                                pattern_conditions = []
-                                for addr_col in address_cols:
-                                    pattern_conditions.append(f"{addr_col} LIKE ?")
-                                    address_params.append(f"%{dir_search}%")
-                                if pattern_conditions:
-                                    address_conditions.append(f"({' OR '.join(pattern_conditions)})")
+                            for direction in ['N', 'S', 'E', 'W']:
+                                dir_pattern = f"{street_number_q} {direction} {street_name_q}"
+                                address_patterns.append(dir_pattern)
 
-                    # Strategy 2: Street number only
-                    elif street_number_q:
+                        # Create condition where ANY address column contains ANY of these complete patterns
                         pattern_conditions = []
-                        for addr_col in address_cols:
-                            pattern_conditions.append(f"{addr_col} LIKE ?")
-                            address_params.append(f"%{street_number_q}%")
-                        if pattern_conditions:
-                            address_conditions.append(f"({' OR '.join(pattern_conditions)})")
-
-                    # Strategy 3: Street name only
-                    elif street_name_q:
-                        pattern_conditions = []
-                        for addr_col in address_cols:
-                            pattern_conditions.append(f"{addr_col} LIKE ?")
-                            address_params.append(f"%{street_name_q}%")
-                        if pattern_conditions:
-                            address_conditions.append(f"({' OR '.join(pattern_conditions)})")
-
-                    # Strategy 4: Full address fallback (simplified)
-                    if not address_conditions:
-                        logging.info("Using fallback full address search")
-
-                        # Try the original address directly
-                        pattern_conditions = []
-                        for addr_col in address_cols:
-                            pattern_conditions.append(f"{addr_col} LIKE ?")
-                            address_params.append(f"%{input_addr}%")
-                        if pattern_conditions:
-                            address_conditions.append(f"({' OR '.join(pattern_conditions)})")
-
-                        # Try normalized version
-                        normalized_addr = normalize_text(input_addr)
-                        if normalized_addr != input_addr:
-                            pattern_conditions = []
+                        for pattern in address_patterns[:4]:  # Limit to 4 patterns
                             for addr_col in address_cols:
                                 pattern_conditions.append(f"{addr_col} LIKE ?")
-                                address_params.append(f"%{normalized_addr}%")
-                            if pattern_conditions:
-                                address_conditions.append(f"({' OR '.join(pattern_conditions)})")
+                                params.append(f"%{pattern}%")
 
-                    # ZIP code search (always include if provided)
-                    if zip_q:
+                        if pattern_conditions:
+                            where_parts.append(f"({' OR '.join(pattern_conditions)})")
+
+                    elif street_number_q:
+                        # Only street number - less strict
+                        logging.info("Searching for street_number='%s' only", street_number_q)
                         pattern_conditions = []
                         for addr_col in address_cols:
                             pattern_conditions.append(f"{addr_col} LIKE ?")
-                            address_params.append(f"%{zip_q}%")
+                            params.append(f"%{street_number_q}%")
                         if pattern_conditions:
-                            address_conditions.append(f"({' OR '.join(pattern_conditions)})")
+                            where_parts.append(f"({' OR '.join(pattern_conditions)})")
 
-                    logging.debug("Generated %d search conditions with %d parameters", len(address_conditions), len(address_params))
+                    elif street_name_q:
+                        # Only street name - less strict
+                        logging.info("Searching for street_name='%s' only", street_name_q)
+                        pattern_conditions = []
+                        for addr_col in address_cols:
+                            pattern_conditions.append(f"{addr_col} LIKE ?")
+                            params.append(f"%{street_name_q}%")
+                        if pattern_conditions:
+                            where_parts.append(f"({' OR '.join(pattern_conditions)})")
+
+                    else:
+                        # No components - fallback to full address
+                        logging.info("No address components - using full address search")
+                        normalized_addr = normalize_text(input_addr)
+                        pattern_conditions = []
+                        for addr_col in address_cols:
+                            pattern_conditions.append(f"{addr_col} LIKE ?")
+                            params.append(f"%{normalized_addr}%")
+                        if pattern_conditions:
+                            where_parts.append(f"({' OR '.join(pattern_conditions)})")
+
+                    # Step 2: Postal code filter (strict match if provided)
+                    if zip_q:
+                        logging.info("Applying postal code filter: '%s'", zip_q)
+                        # Check OriginalZip column first, then search in address fields
+                        zip_conditions = []
+                        if "OriginalZip" in columns:
+                            zip_conditions.append("OriginalZip = ?")
+                            params.append(zip_q)
+                        if "ZipCode" in columns:
+                            zip_conditions.append("ZipCode = ?")
+                            params.append(zip_q)
+                        if "ZIP" in columns:
+                            zip_conditions.append("ZIP = ?")
+                            params.append(zip_q)
+
+                        # Also search in address fields for zip
+                        for addr_col in address_cols:
+                            zip_conditions.append(f"{addr_col} LIKE ?")
+                            params.append(f"%{zip_q}%")
+
+                        if zip_conditions:
+                            where_parts.append(f"({' OR '.join(zip_conditions)})")
+
+                    logging.debug("Address/Zip conditions: %d parts with %d params", len(where_parts), len(params))
 
                     # Build WHERE clause
                     if address_conditions:
@@ -927,8 +955,9 @@ def search(
                         where_parts = ["1=0"]  # No results
                         params = []
 
-                    # Add permit filter if provided
+                    # Step 3: Permit number filter (strict match if provided)
                     if permit:
+                        logging.info("Applying permit number filter: '%s'", permit)
                         permit_cols = ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
                         permit_col = None
                         for col in permit_cols:
@@ -937,26 +966,35 @@ def search(
                                 break
                         if permit_col:
                             where_parts.append(f"AND {permit_col} = ?")
-                            params.append(permit)
+                            params.append(permit.strip())
 
-                    # Add date filters if provided
-                    date_col = None
+                    # Step 4: Date range filter (if provided)
                     if date_from or date_to:
+                        date_col = None
                         for col in ["AppliedDate", "ApplicationDate", "DateApplied", "Date"]:
                             if col in columns:
                                 date_col = col
                                 break
 
-                    if date_from and date_col:
-                        where_parts.append(f"AND {date_col} >= ?")
-                        params.append(date_from)
+                        if date_from and date_col:
+                            logging.info("Applying date_from filter: '%s'", date_from)
+                            where_parts.append(f"AND {date_col} >= ?")
+                            params.append(date_from)
 
-                    if date_to and date_col:
-                        where_parts.append(f"AND {date_col} <= ?")
-                        params.append(date_to)
+                        if date_to and date_col:
+                            logging.info("Applying date_to filter: '%s'", date_to)
+                            where_parts.append(f"AND {date_col} <= ?")
+                            params.append(date_to)
 
                     # Build and execute query
-                    query = f"SELECT TOP {max_results} * FROM {table} WHERE {' '.join(where_parts)}"
+                    if where_parts:
+                        query = f"SELECT TOP {max_results} * FROM {table} WHERE {' AND '.join(where_parts)}"
+                    else:
+                        # Fallback if no conditions (shouldn't happen)
+                        query = f"SELECT TOP {max_results} * FROM {table}"
+
+                    logging.info("Final query: %s", query[:300] + "..." if len(query) > 300 else query)
+                    logging.debug("Query params: %s", params)
 
                     logging.info("Executing query on %s: %s", table, query[:200] + "..." if len(query) > 200 else query)
                     logging.debug("Query params: %s", params)
@@ -997,8 +1035,8 @@ def search(
                     continue
             
             dur_ms = int((time.perf_counter() - start_t) * 1000)
-            logging.info("SEARCH done | results=%d duration_ms=%d address_components=(street_num='%s', route='%s', zip='%s')",
-                         len(results), dur_ms, street_number_q, street_name_q, zip_q)
+            logging.info("SEARCH done | results=%d duration_ms=%d | components: street_num='%s', street_name='%s', zip='%s', permit='%s'",
+                         len(results), dur_ms, street_number_q, street_name_q, zip_q, permit)
             
             if len(results) == 0:
                 return JSONResponse({
