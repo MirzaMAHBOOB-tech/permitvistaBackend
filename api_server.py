@@ -148,6 +148,9 @@ DB_QUERY_TIMEOUT = int(os.getenv("DB_QUERY_TIMEOUT", "30"))
 DB_MAX_RETRIES = int(os.getenv("DB_MAX_RETRIES", "3"))
 DB_RETRY_DELAY = float(os.getenv("DB_RETRY_DELAY", "1.0"))
 
+# Database optimization settings
+DB_ENABLE_INDEXES = os.getenv("DB_ENABLE_INDEXES", "true").lower() == "true"
+
 # Thread-safe connection pool
 _db_pool: Optional[Queue] = None
 _db_pool_lock = threading.Lock()
@@ -216,6 +219,73 @@ def _is_connection_alive(conn) -> bool:
         return True
     except:
         return False
+
+def ensure_address_indexes():
+    """Create indexes on address columns if they don't exist"""
+    if not DB_ENABLE_INDEXES:
+        logging.info("Database indexing disabled via DB_ENABLE_INDEXES=false")
+        return
+
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            # Tables to index
+            tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
+
+            for table in tables:
+                try:
+                    # Check if table exists
+                    cursor.execute("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = ?", (table.split('.')[1],))
+                    if not cursor.fetchone():
+                        continue
+
+                    # Address columns to index
+                    address_cols = ["SearchAddress", "OriginalAddress1", "AddressDescription", "Address", "OriginalAddress", "StreetAddress", "PropertyAddress"]
+
+                    for col in address_cols:
+                        try:
+                            # Check if index exists
+                            cursor.execute("""
+                                SELECT i.name
+                                FROM sys.indexes i
+                                INNER JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                                INNER JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                                WHERE i.object_id = OBJECT_ID(?)
+                                AND c.name = ?
+                                AND i.type_desc != 'HEAP'
+                            """, (table, col))
+
+                            if cursor.fetchone():
+                                logging.debug("Index already exists for %s.%s", table, col)
+                                continue
+
+                            # Check if column exists and has data
+                            cursor.execute(f"SELECT TOP 1 {col} FROM {table} WHERE {col} IS NOT NULL AND LEN({col}) > 0")
+                            if not cursor.fetchone():
+                                logging.debug("Column %s.%s has no data, skipping index", table, col)
+                                continue
+
+                            # Create index (non-unique, non-clustered)
+                            index_name = f"idx_{table.split('.')[1]}_{col.lower()}"
+                            create_sql = f"CREATE NONCLUSTERED INDEX {index_name} ON {table}({col})"
+
+                            logging.info("Creating index: %s", create_sql)
+                            cursor.execute(create_sql)
+                            conn.commit()
+
+                        except Exception as e:
+                            logging.warning("Failed to create index for %s.%s: %s", table, col, str(e))
+                            continue
+
+                except Exception as e:
+                    logging.warning("Error processing table %s: %s", table, str(e))
+                    continue
+
+            logging.info("Database indexing check completed")
+
+    except Exception as e:
+        logging.error("Error in ensure_address_indexes: %s", str(e))
 
 @contextmanager
 def get_db_connection():
@@ -600,13 +670,16 @@ def canonicalize_address_main(s: str) -> Tuple[str, List[str]]:
         rest_norm.insert(0, d)
     return street_num, rest_norm
 
-# Database connection test on startup
+# Database connection test on startup and index creation
 try:
     if DB_PASSWORD:
         with get_db_connection() as test_conn:
             # Connection is automatically returned to pool
             pass
         logging.info("✅ Database connection successful: %s/%s", DB_SERVER, DB_DATABASE)
+
+        # Ensure address indexes exist
+        ensure_address_indexes()
     else:
         logging.warning("⚠️ DB_PASSWORD not set - database queries will fail")
 except Exception as e:
@@ -621,6 +694,74 @@ def health():
         "src_container": SRC_CONTAINER,
         "output_container": OUTPUT_CONTAINER
     })
+
+@app.get("/db-health")
+def db_health():
+    """Check database health, indexes, and table statistics"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            health_info = {"database_connected": True, "tables": {}, "indexes": {}}
+
+            # Check tables
+            for table in ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]:
+                try:
+                    # Get row count
+                    cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                    row_count = cursor.fetchone()[0]
+
+                    # Get column info
+                    cursor.execute(f"SELECT TOP 1 * FROM {table}")
+                    columns = [column[0] for column in cursor.description]
+
+                    health_info["tables"][table] = {
+                        "row_count": row_count,
+                        "columns": columns
+                    }
+
+                    # Check for indexes on address columns
+                    address_cols = ["SearchAddress", "OriginalAddress1", "AddressDescription", "Address"]
+                    for col in address_cols:
+                        if col in columns:
+                            try:
+                                # Check if column has an index
+                                cursor.execute("""
+                                    SELECT i.name AS index_name, i.type_desc
+                                    FROM sys.indexes i
+                                    INNER JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                                    INNER JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                                    WHERE i.object_id = OBJECT_ID(?)
+                                    AND c.name = ?
+                                    AND i.type_desc != 'HEAP'
+                                """, (table, col))
+
+                                indexes = cursor.fetchall()
+                                if indexes:
+                                    if table not in health_info["indexes"]:
+                                        health_info["indexes"][table] = {}
+                                    health_info["indexes"][table][col] = [
+                                        {"name": idx[0], "type": idx[1]} for idx in indexes
+                                    ]
+                            except Exception as e:
+                                logging.debug("Error checking index for %s.%s: %s", table, col, e)
+
+                except Exception as e:
+                    health_info["tables"][table] = {"error": str(e)}
+
+            # Test a simple query performance
+            start_time = time.perf_counter()
+            cursor.execute("SELECT TOP 1 * FROM dbo.permits")
+            cursor.fetchone()
+            query_time = time.perf_counter() - start_time
+            health_info["query_performance_ms"] = query_time * 1000
+
+            return JSONResponse(health_info)
+
+    except Exception as e:
+        return JSONResponse({
+            "database_connected": False,
+            "error": str(e)
+        })
 
 @app.get("/my-ip")
 def get_my_ip():
@@ -637,6 +778,116 @@ def get_my_ip():
         return JSONResponse({
             "error": str(e),
             "message": "Could not determine IP address"
+        })
+
+@app.get("/debug-addresses")
+def debug_addresses(table: str = Query("dbo.permits"), limit: int = Query(10)):
+    """Debug endpoint to see what addresses exist in the database"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            # Get sample addresses from the table
+            query = f"""
+                SELECT TOP {limit}
+                    SearchAddress, OriginalAddress1, AddressDescription, Address,
+                    OriginalAddress, StreetAddress, PropertyAddress
+                FROM {table}
+                WHERE (SearchAddress IS NOT NULL AND LEN(SearchAddress) > 0)
+                   OR (OriginalAddress1 IS NOT NULL AND LEN(OriginalAddress1) > 0)
+                   OR (AddressDescription IS NOT NULL AND LEN(AddressDescription) > 0)
+            """
+
+            cursor.execute(query)
+            columns = [column[0] for column in cursor.description]
+            results = []
+
+            for row in cursor.fetchall():
+                rec = {col: (str(val) if val is not None else "") for col, val in zip(columns, row)}
+                results.append(rec)
+
+            return JSONResponse({
+                "table": table,
+                "sample_addresses": results,
+                "total_samples": len(results)
+            })
+
+    except Exception as e:
+        return JSONResponse({
+            "error": str(e),
+            "table": table
+        })
+
+@app.get("/test-address-search")
+def test_address_search(address: str = Query(...), table: str = Query("dbo.permits")):
+    """Test if an address exists in the database"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            # Parse the address like the search function does
+            street_num, route_text, zip_code = extract_address_components(address)
+
+            # Try the same search patterns
+            search_patterns = []
+
+            if street_num and route_text:
+                base_search = f"{street_num} {route_text}"
+                search_patterns.append(f"%{base_search}%")
+
+                # Try with directions
+                for direction in ['N', 'S', 'E', 'W']:
+                    dir_search = f"{street_num} {direction} {route_text}"
+                    search_patterns.append(f"%{dir_search}%")
+
+            if zip_code:
+                search_patterns.append(f"%{zip_code}%")
+
+            # Test each pattern
+            results = []
+            for pattern in search_patterns[:5]:  # Limit patterns
+                query = f"""
+                    SELECT TOP 5
+                        SearchAddress, OriginalAddress1, AddressDescription, PermitNumber
+                    FROM {table}
+                    WHERE SearchAddress LIKE ?
+                       OR OriginalAddress1 LIKE ?
+                       OR AddressDescription LIKE ?
+                       OR Address LIKE ?
+                """
+
+                cursor.execute(query, (pattern, pattern, pattern, pattern))
+                matches = cursor.fetchall()
+
+                if matches:
+                    results.append({
+                        "pattern": pattern,
+                        "matches": [
+                            {
+                                "SearchAddress": row[0],
+                                "OriginalAddress1": row[1],
+                                "AddressDescription": row[2],
+                                "PermitNumber": row[3]
+                            } for row in matches
+                        ]
+                    })
+
+            return JSONResponse({
+                "address": address,
+                "parsed": {
+                    "street_number": street_num,
+                    "route_text": route_text,
+                    "zip_code": zip_code
+                },
+                "search_patterns_tested": search_patterns[:5],
+                "results": results
+            })
+
+    except Exception as e:
+        return JSONResponse({
+            "error": str(e),
+            "address": address,
+            "table": table
         })
 
 @app.get("/facets")
@@ -754,96 +1005,108 @@ def search(
                     # Get table columns first to check what address fields exist
                     cursor.execute(f"SELECT TOP 1 * FROM {table}")
                     columns = [column[0] for column in cursor.description]
-                    
+
                     # Find address-related columns
                     address_cols = []
                     for col in ["SearchAddress", "OriginalAddress1", "AddressDescription", "Address", "OriginalAddress", "StreetAddress", "PropertyAddress"]:
                         if col in columns:
                             address_cols.append(col)
-                    
+
                     if not address_cols:
                         logging.warning("No address columns found in table %s", table)
                         continue
-                    
-                    # Build flexible address search conditions
+
+                    # SIMPLIFIED AND MORE DIRECT SEARCH STRATEGY
                     address_conditions = []
                     address_params = []
-                    
-                    # Strategy 1: Use provided address components if available
-                    if street_number_q or street_name_q or zip_q:
-                        logging.info("Using component-based search: street_number=%s, street_name=%s, street_type=%s, street_dir=%s, zip=%s",
-                                    street_number_q, street_name_q, street_type_q, street_dir_q, zip_q)
-                        # Build component-based search patterns
-                        search_patterns = []
-                        
-                        if street_number_q and street_name_q:
-                            # Try variations: "506 Lincoln", "506 N Lincoln", "506 Lincoln Ave"
-                            search_patterns.extend([
-                                f"%{street_number_q} {street_name_q}%",
-                                f"%{street_number_q} N {street_name_q}%",
-                                f"%{street_number_q} S {street_name_q}%",
-                                f"%{street_number_q} E {street_name_q}%",
-                                f"%{street_number_q} W {street_name_q}%",
-                                f"%{street_number_q}%{street_name_q}%",  # No space between
-                            ])
-                            if street_type_q:
-                                search_patterns.extend([
-                                    f"%{street_number_q} {street_name_q} {street_type_q}%",
-                                    f"%{street_number_q} N {street_name_q} {street_type_q}%",
-                                    f"%{street_number_q} {street_name_q} {normalize_suffix(street_type_q)}%",  # Normalized suffix
-                                ])
-                            if street_dir_q:
-                                search_patterns.append(f"%{street_number_q} {street_dir_q} {street_name_q}%")
-                                if street_type_q:
-                                    search_patterns.append(f"%{street_number_q} {street_dir_q} {street_name_q} {street_type_q}%")
-                        
-                        # Also search by zip if provided
-                        if zip_q:
-                            search_patterns.append(f"%{zip_q}%")
-                        
-                        # Build conditions: (col1 LIKE ? OR col2 LIKE ?) for each pattern
-                        if search_patterns:
-                            for pattern in search_patterns:
+
+                    logging.info("Search components: street_number='%s', street_name='%s', zip='%s'",
+                                street_number_q, street_name_q, zip_q)
+
+                    # Strategy 1: Direct component search (most efficient)
+                    if street_number_q and street_name_q:
+                        # Primary search: "506 Lincoln" or "506 N Lincoln"
+                        base_search = f"{street_number_q} {street_name_q}"
+
+                        # Build condition for all address columns
+                        pattern_conditions = []
+                        for addr_col in address_cols:
+                            pattern_conditions.append(f"{addr_col} LIKE ?")
+                            address_params.append(f"%{base_search}%")
+                        if pattern_conditions:
+                            address_conditions.append(f"({' OR '.join(pattern_conditions)})")
+
+                        # Also try with common directions if no street_dir_q provided
+                        if not street_dir_q:
+                            for direction in ['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW']:
+                                dir_search = f"{street_number_q} {direction} {street_name_q}"
                                 pattern_conditions = []
                                 for addr_col in address_cols:
                                     pattern_conditions.append(f"{addr_col} LIKE ?")
-                                    address_params.append(pattern)
+                                    address_params.append(f"%{dir_search}%")
                                 if pattern_conditions:
                                     address_conditions.append(f"({' OR '.join(pattern_conditions)})")
-                    
-                    # Strategy 2: Fallback to full address string search (normalized)
+
+                    # Strategy 2: Street number only
+                    elif street_number_q:
+                        pattern_conditions = []
+                        for addr_col in address_cols:
+                            pattern_conditions.append(f"{addr_col} LIKE ?")
+                            address_params.append(f"%{street_number_q}%")
+                        if pattern_conditions:
+                            address_conditions.append(f"({' OR '.join(pattern_conditions)})")
+
+                    # Strategy 3: Street name only
+                    elif street_name_q:
+                        pattern_conditions = []
+                        for addr_col in address_cols:
+                            pattern_conditions.append(f"{addr_col} LIKE ?")
+                            address_params.append(f"%{street_name_q}%")
+                        if pattern_conditions:
+                            address_conditions.append(f"({' OR '.join(pattern_conditions)})")
+
+                    # Strategy 4: Full address fallback (simplified)
                     if not address_conditions:
-                        logging.info("Using fallback full-address search for: %s", input_addr)
-                        # Normalize the input address for better matching
+                        logging.info("Using fallback full address search")
+
+                        # Try the original address directly
+                        pattern_conditions = []
+                        for addr_col in address_cols:
+                            pattern_conditions.append(f"{addr_col} LIKE ?")
+                            address_params.append(f"%{input_addr}%")
+                        if pattern_conditions:
+                            address_conditions.append(f"({' OR '.join(pattern_conditions)})")
+
+                        # Try normalized version
                         normalized_addr = normalize_text(input_addr)
-                        # Remove common words that might not be in DB
-                        normalized_addr = re.sub(r'\b(usa|fl|florida|tampa|miami|orlando)\b', '', normalized_addr, flags=re.IGNORECASE).strip()
-                        logging.info("Normalized address: %s", normalized_addr)
-                        
-                        # Build patterns to try
-                        search_patterns = []
-                        if normalized_addr:
-                            search_patterns.append(normalized_addr)
-                        search_patterns.append(input_addr)
-                        
-                        # Build conditions for each pattern
-                        for pattern in search_patterns:
+                        if normalized_addr != input_addr:
                             pattern_conditions = []
                             for addr_col in address_cols:
                                 pattern_conditions.append(f"{addr_col} LIKE ?")
-                                address_params.append(f"%{pattern}%")
+                                address_params.append(f"%{normalized_addr}%")
                             if pattern_conditions:
                                 address_conditions.append(f"({' OR '.join(pattern_conditions)})")
-                    
-                    # Build WHERE clause with OR conditions between patterns
+
+                    # ZIP code search (always include if provided)
+                    if zip_q:
+                        pattern_conditions = []
+                        for addr_col in address_cols:
+                            pattern_conditions.append(f"{addr_col} LIKE ?")
+                            address_params.append(f"%{zip_q}%")
+                        if pattern_conditions:
+                            address_conditions.append(f"({' OR '.join(pattern_conditions)})")
+
+                    logging.debug("Generated %d search conditions with %d parameters", len(address_conditions), len(address_params))
+
+                    # Build WHERE clause
                     if address_conditions:
+                        # Use OR between different search patterns
                         where_parts = [f"({' OR '.join(address_conditions)})"]
                         params = address_params
                     else:
-                        # Fallback: search all address columns with empty string (shouldn't happen)
                         where_parts = ["1=0"]  # No results
                         params = []
-                    
+
                     # Add permit filter if provided
                     if permit:
                         permit_cols = ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
@@ -855,7 +1118,7 @@ def search(
                         if permit_col:
                             where_parts.append(f"AND {permit_col} = ?")
                             params.append(permit)
-                    
+
                     # Add date filters if provided
                     date_col = None
                     if date_from or date_to:
@@ -863,29 +1126,34 @@ def search(
                             if col in columns:
                                 date_col = col
                                 break
-                    
+
                     if date_from and date_col:
                         where_parts.append(f"AND {date_col} >= ?")
                         params.append(date_from)
-                    
+
                     if date_to and date_col:
                         where_parts.append(f"AND {date_col} <= ?")
                         params.append(date_to)
-                    
+
+                    # Build and execute query
                     query = f"SELECT TOP {max_results} * FROM {table} WHERE {' '.join(where_parts)}"
-                    
-                    logging.info("Executing query: %s with params: %s", query, params)
+
+                    logging.info("Executing optimized query on %s: %s", table, query[:200] + "..." if len(query) > 200 else query)
+                    logging.debug("Query params: %s", params)
+
+                    query_start = time.perf_counter()
                     cursor.execute(query, params)
-                    
-                    # Fetch all results and convert to dict
+                    query_time = time.perf_counter() - query_start
+
+                    # Fetch results
                     columns = [column[0] for column in cursor.description]
                     table_results = []
                     for row in cursor.fetchall():
                         rec = {col: (str(val) if val is not None else "") for col, val in zip(columns, row)}
                         table_results.append(rec)
                         all_results.append(rec)
-                    
-                    logging.info("Found %d results from table %s", len(table_results), table)
+
+                    logging.info("Found %d results from table %s in %.2fms", len(table_results), table, query_time * 1000)
                     
                 except Exception as e:
                     logging.exception("Error querying table %s: %s", table, e)
@@ -909,7 +1177,8 @@ def search(
                     continue
             
             dur_ms = int((time.perf_counter() - start_t) * 1000)
-            logging.info("SEARCH done | results=%d duration_ms=%d", len(results), dur_ms)
+            logging.info("SEARCH done | results=%d duration_ms=%d address_components=(street_num='%s', route='%s', zip='%s')",
+                         len(results), dur_ms, street_number_q, street_name_q, zip_q)
             
             if len(results) == 0:
                 return JSONResponse({
