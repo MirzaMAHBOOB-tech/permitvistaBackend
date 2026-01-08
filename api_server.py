@@ -182,6 +182,7 @@ def _init_connection_pool():
 
 def _create_new_connection():
     """Create a new database connection with retry logic"""
+    global _db_connection_string
     if not _db_connection_string:
         _db_connection_string = _build_connection_string()
     
