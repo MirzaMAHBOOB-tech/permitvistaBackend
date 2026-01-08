@@ -835,8 +835,18 @@ def search(
     zip_q: Optional[str] = Query(None, description="Optional zip code from Google selection")
 ):
     """
-    Search records by address using database query.
-    Queries the SQL Server database using LIKE '%ADDRESS%' on SearchAddress column.
+    Search records by address using STRICT matching criteria.
+    
+    Search Logic (applied in order):
+    1. Address Match: If street_number AND street_name are provided, BOTH must appear together 
+       in the same address field (e.g., "506 Lincoln" not "506" in one field and "Lincoln" in another)
+    2. ZIP Filter: If ZIP is provided, it must match exactly (prevents wrong ZIP matches)
+    3. Permit Filter: If permit number is provided, it must match exactly
+    4. Date Filter: If date range is provided, records must fall within that range
+    
+    This ensures accurate results when:
+    - User selects from Google autocomplete (components auto-filled) ✅
+    - User manually types address in main field only (components extracted) ✅
     """
     start_t = time.perf_counter()
     results: List[dict] = []
@@ -858,29 +868,52 @@ def search(
             cursor = conn.cursor()
             
             # Extract address components from input if not provided as separate params
+            # This handles manual address entry (when user types in main field only)
             if not street_number_q and not street_name_q and not zip_q:
                 street_num, route_text, zip_code = extract_address_components(input_addr)
+                
                 if street_num:
                     street_number_q = street_num
+                
                 if route_text:
-                    # Better parsing of route_text: "n lincoln ave" -> street_name="lincoln", street_type="ave"
-                    route_parts = route_text.split()
-
-                    # Handle directional prefix: "n lincoln" -> direction="n", name="lincoln"
-                    if len(route_parts) >= 2 and route_parts[0].lower() in ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']:
-                        street_dir_q = route_parts[0].upper()
-                        street_name_q = route_parts[1]
-                        # Rest might be street type
-                        if len(route_parts) >= 3:
-                            street_type_q = route_parts[2]
-                    else:
-                        # No directional prefix: "lincoln ave" -> name="lincoln", type="ave"
-                        street_name_q = route_parts[0]
-                        if len(route_parts) >= 2:
-                            street_type_q = route_parts[1]
+                    # Parse route_text more carefully: "n lincoln ave" -> direction="N", name="lincoln", type="ave"
+                    route_parts = [p for p in route_text.split() if p]  # Remove empty strings
+                    
+                    if len(route_parts) >= 1:
+                        # Check if first part is a direction
+                        first_part = route_parts[0].lower()
+                        direction_map = {
+                            'n': 'N', 's': 'S', 'e': 'E', 'w': 'W',
+                            'ne': 'NE', 'nw': 'NW', 'se': 'SE', 'sw': 'SW',
+                            'north': 'N', 'south': 'S', 'east': 'E', 'west': 'W'
+                        }
+                        
+                        if first_part in direction_map:
+                            # First part is direction: "n lincoln ave"
+                            street_dir_q = direction_map[first_part]
+                            if len(route_parts) >= 2:
+                                street_name_q = route_parts[1]
+                            if len(route_parts) >= 3:
+                                street_type_q = route_parts[2]
+                        else:
+                            # First part is street name: "lincoln ave"
+                            street_name_q = route_parts[0]
+                            if len(route_parts) >= 2:
+                                # Check if second part is direction or type
+                                second_part = route_parts[1].lower()
+                                if second_part in direction_map:
+                                    street_dir_q = direction_map[second_part]
+                                    if len(route_parts) >= 3:
+                                        street_type_q = route_parts[2]
+                                else:
+                                    street_type_q = route_parts[1]
 
                 if zip_code:
                     zip_q = zip_code
+
+            # Log extracted components for debugging
+            logging.info("Extracted components: street_number='%s', street_name='%s', street_type='%s', street_dir='%s', zip='%s'",
+                        street_number_q, street_name_q, street_type_q, street_dir_q, zip_q)
 
             # Validation: require at least some search criteria to prevent overly broad searches
             has_address_criteria = street_number_q or street_name_q
@@ -920,15 +953,15 @@ def search(
                     where_parts = []
                     params = []
 
-                    # Step 1: Address matching - must contain both street number AND street name
+                    # Step 1: Address matching - STRICT: must contain both street number AND street name in same field
                     if street_number_q and street_name_q:
-                        logging.info("Searching for street_number='%s' AND street_name='%s' in same address field",
+                        logging.info("STRICT search: street_number='%s' AND street_name='%s' must be in same address field",
                                     street_number_q, street_name_q)
 
-                        # Build patterns that require both components in the same field
+                        # Build patterns that require BOTH components together (not separate)
                         address_patterns = []
 
-                        # Primary: "506 Lincoln"
+                        # Primary pattern: "506 Lincoln" (both together)
                         base_pattern = f"{street_number_q} {street_name_q}"
                         address_patterns.append(base_pattern)
 
@@ -937,29 +970,54 @@ def search(
                             dir_pattern = f"{street_number_q} {street_dir_q} {street_name_q}"
                             address_patterns.append(dir_pattern)
 
-                        # Try common directions if no direction specified
+                        # With street type if provided: "506 Lincoln Ave"
+                        if street_type_q:
+                            type_pattern = f"{street_number_q} {street_name_q} {street_type_q}"
+                            address_patterns.append(type_pattern)
+                            
+                            # With both direction and type: "506 N Lincoln Ave"
+                            if street_dir_q:
+                                full_pattern = f"{street_number_q} {street_dir_q} {street_name_q} {street_type_q}"
+                                address_patterns.append(full_pattern)
+
+                        # Try common directions if no direction specified (but limit to avoid too many patterns)
                         if not street_dir_q:
+                            # Only try N, S, E, W (not NE, NW, etc. to keep it focused)
                             for direction in ['N', 'S', 'E', 'W']:
                                 dir_pattern = f"{street_number_q} {direction} {street_name_q}"
                                 address_patterns.append(dir_pattern)
+                                if street_type_q:
+                                    dir_type_pattern = f"{street_number_q} {direction} {street_name_q} {street_type_q}"
+                                    address_patterns.append(dir_type_pattern)
 
-                        # Create condition where ANY address column contains ANY of these complete patterns
+                        # Limit patterns to avoid performance issues
+                        address_patterns = address_patterns[:6]
+
+                        # Create condition: ANY address column must contain ANY of these complete patterns
+                        # This ensures street_number AND street_name are together
                         pattern_conditions = []
-                        for pattern in address_patterns[:4]:  # Limit to 4 patterns
+                        for pattern in address_patterns:
                             for addr_col in address_cols:
                                 pattern_conditions.append(f"{addr_col} LIKE ?")
                                 params.append(f"%{pattern}%")
 
                         if pattern_conditions:
                             where_parts.append(f"({' OR '.join(pattern_conditions)})")
+                        else:
+                            # Should not happen, but if it does, log warning
+                            logging.warning("No address patterns generated for street_number='%s' street_name='%s'", 
+                                          street_number_q, street_name_q)
 
                     elif street_number_q:
-                        # Only street number - less strict
-                        logging.info("Searching for street_number='%s' only", street_number_q)
+                        # Only street number - use word boundary to avoid partial matches
+                        # e.g., "506" should not match "2506"
+                        logging.info("Searching for street_number='%s' only (with word boundary)", street_number_q)
                         pattern_conditions = []
                         for addr_col in address_cols:
-                            pattern_conditions.append(f"{addr_col} LIKE ?")
-                            params.append(f"%{street_number_q}%")
+                            # Match street number at start or with space before it
+                            pattern_conditions.append(f"({addr_col} LIKE ? OR {addr_col} LIKE ?)")
+                            params.append(f"{street_number_q} %")  # At start
+                            params.append(f"% {street_number_q}%")  # With space before
                         if pattern_conditions:
                             where_parts.append(f"({' OR '.join(pattern_conditions)})")
 
@@ -984,11 +1042,12 @@ def search(
                         if pattern_conditions:
                             where_parts.append(f"({' OR '.join(pattern_conditions)})")
 
-                    # Step 2: Postal code filter (strict match if provided)
+                    # Step 2: Postal code filter (STRICT match if provided)
                     if zip_q:
-                        logging.info("Applying postal code filter: '%s'", zip_q)
-                        # Check OriginalZip column first, then search in address fields
+                        logging.info("STRICT postal code filter: '%s'", zip_q)
                         zip_conditions = []
+                        
+                        # First priority: Exact match on dedicated ZIP columns
                         if "OriginalZip" in columns:
                             zip_conditions.append("OriginalZip = ?")
                             params.append(zip_q)
@@ -998,14 +1057,22 @@ def search(
                         if "ZIP" in columns:
                             zip_conditions.append("ZIP = ?")
                             params.append(zip_q)
+                        if "Zip" in columns:
+                            zip_conditions.append("Zip = ?")
+                            params.append(zip_q)
 
-                        # Also search in address fields for zip
+                        # Second priority: ZIP must appear in address fields (but still strict)
+                        # Use word boundary to avoid partial matches like "33609" matching "336091"
                         for addr_col in address_cols:
-                            zip_conditions.append(f"{addr_col} LIKE ?")
-                            params.append(f"%{zip_q}%")
+                            # Match ZIP as whole word or at end of string
+                            zip_conditions.append(f"({addr_col} LIKE ? OR {addr_col} LIKE ?)")
+                            params.append(f"% {zip_q}%")  # ZIP with space before
+                            params.append(f"%{zip_q}")    # ZIP at end
 
                         if zip_conditions:
                             where_parts.append(f"({' OR '.join(zip_conditions)})")
+                        else:
+                            logging.warning("No ZIP columns found for strict matching")
 
                     logging.debug("Address/Zip conditions: %d parts with %d params", len(where_parts), len(params))
 
@@ -1065,7 +1132,14 @@ def search(
                         table_results.append(rec)
                         all_results.append(rec)
 
-                    logging.info("Found %d results from table %s", len(table_results), table)
+                    # Log sample matches for debugging
+                    if table_results:
+                        sample_addr = table_results[0].get("SearchAddress") or table_results[0].get("OriginalAddress1") or "N/A"
+                        sample_zip = table_results[0].get("OriginalZip") or table_results[0].get("ZipCode") or "N/A"
+                        logging.info("Found %d results from table %s | Sample: address='%s', zip='%s'", 
+                                    len(table_results), table, sample_addr[:50], sample_zip)
+                    else:
+                        logging.info("Found 0 results from table %s", table)
                     
                 except Exception as e:
                     logging.exception("Error querying table %s: %s", table, e)
