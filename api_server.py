@@ -25,6 +25,8 @@ from datetime import datetime, timedelta
 
 # ----------------- Database Import -----------------
 import pyodbc
+from queue import Queue, Empty
+from contextlib import contextmanager
 
 # ----------------- Token Management for Privacy -----------------
 # Store token -> permit_id mapping (with expiration)
@@ -137,13 +139,26 @@ else:
 
 ID_CANDIDATES = ["PermitNumber", "PermitNum", "_id", "ID", "OBJECTID", "FID", "ApplicationNumber"]
 
-# ----------------- Database Connection Helper -----------------
-def get_db_connection():
-    """Create and return a database connection"""
+# ----------------- Database Connection Pool -----------------
+# Connection pool settings
+DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
+DB_POOL_MAX_OVERFLOW = int(os.getenv("DB_POOL_MAX_OVERFLOW", "10"))
+DB_CONNECTION_TIMEOUT = int(os.getenv("DB_CONNECTION_TIMEOUT", "60"))
+DB_QUERY_TIMEOUT = int(os.getenv("DB_QUERY_TIMEOUT", "30"))
+DB_MAX_RETRIES = int(os.getenv("DB_MAX_RETRIES", "3"))
+DB_RETRY_DELAY = float(os.getenv("DB_RETRY_DELAY", "1.0"))
+
+# Thread-safe connection pool
+_db_pool: Optional[Queue] = None
+_db_pool_lock = threading.Lock()
+_db_connection_string: Optional[str] = None
+
+def _build_connection_string() -> str:
+    """Build the database connection string"""
     if not DB_PASSWORD:
         raise ValueError("DB_PASSWORD environment variable is required")
     
-    connection_string = (
+    return (
         f"DRIVER={{ODBC Driver 18 for SQL Server}};"
         f"SERVER={DB_SERVER};"
         f"DATABASE={DB_DATABASE};"
@@ -151,15 +166,103 @@ def get_db_connection():
         f"PWD={DB_PASSWORD};"
         f"Encrypt=yes;"
         f"TrustServerCertificate=no;"
-        f"Connection Timeout=30;"
+        f"Connection Timeout={DB_CONNECTION_TIMEOUT};"
+        f"Command Timeout={DB_QUERY_TIMEOUT};"
     )
+
+def _init_connection_pool():
+    """Initialize the connection pool"""
+    global _db_pool, _db_connection_string
+    if _db_pool is None:
+        with _db_pool_lock:
+            if _db_pool is None:
+                _db_connection_string = _build_connection_string()
+                _db_pool = Queue(maxsize=DB_POOL_SIZE)
+                logging.info("Initialized database connection pool (size=%d)", DB_POOL_SIZE)
+
+def _create_new_connection():
+    """Create a new database connection with retry logic"""
+    if not _db_connection_string:
+        _db_connection_string = _build_connection_string()
+    
+    last_error = None
+    for attempt in range(DB_MAX_RETRIES):
+        try:
+            conn = pyodbc.connect(_db_connection_string, timeout=DB_CONNECTION_TIMEOUT)
+            # Test the connection
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.close()
+            return conn
+        except pyodbc.Error as e:
+            last_error = e
+            if attempt < DB_MAX_RETRIES - 1:
+                delay = DB_RETRY_DELAY * (2 ** attempt)  # Exponential backoff
+                logging.warning("Connection attempt %d/%d failed: %s. Retrying in %.1fs...", 
+                              attempt + 1, DB_MAX_RETRIES, str(e), delay)
+                time.sleep(delay)
+            else:
+                logging.error("All %d connection attempts failed. Last error: %s", DB_MAX_RETRIES, e)
+    
+    raise last_error
+
+def _is_connection_alive(conn) -> bool:
+    """Check if a connection is still alive"""
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        cursor.close()
+        return True
+    except:
+        return False
+
+@contextmanager
+def get_db_connection():
+    """
+    Get a database connection from the pool (context manager).
+    Returns connection and ensures it's returned to pool or closed on error.
+    """
+    _init_connection_pool()
+    conn = None
     
     try:
-        conn = pyodbc.connect(connection_string)
-        return conn
-    except pyodbc.Error as e:
-        logging.exception("Database connection failed: %s", e)
+        # Try to get connection from pool (non-blocking)
+        try:
+            conn = _db_pool.get_nowait()
+            # Verify connection is still alive
+            if not _is_connection_alive(conn):
+                try:
+                    conn.close()
+                except:
+                    pass
+                conn = None
+        except Empty:
+            pass
+        
+        # If no connection from pool, create new one
+        if conn is None:
+            conn = _create_new_connection()
+        
+        yield conn
+        
+    except Exception as e:
+        # On error, close the connection (don't return to pool)
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
         raise
+    else:
+        # On success, return connection to pool if there's room
+        try:
+            _db_pool.put_nowait(conn)
+        except:
+            # Pool is full, close the connection
+            try:
+                conn.close()
+            except:
+                pass
 
 def get_table_name(city: Optional[str]) -> List[str]:
     """Determine which table(s) to query based on city parameter"""
@@ -499,8 +602,9 @@ def canonicalize_address_main(s: str) -> Tuple[str, List[str]]:
 # Database connection test on startup
 try:
     if DB_PASSWORD:
-        test_conn = get_db_connection()
-        test_conn.close()
+        with get_db_connection() as test_conn:
+            # Connection is automatically returned to pool
+            pass
         logging.info("✅ Database connection successful: %s/%s", DB_SERVER, DB_DATABASE)
     else:
         logging.warning("⚠️ DB_PASSWORD not set - database queries will fail")
@@ -516,6 +620,23 @@ def health():
         "src_container": SRC_CONTAINER,
         "output_container": OUTPUT_CONTAINER
     })
+
+@app.get("/my-ip")
+def get_my_ip():
+    """Get the current outbound IP address of this Render service"""
+    try:
+        import urllib.request
+        # Use a service to get the public IP
+        ip = urllib.request.urlopen('https://api.ipify.org').read().decode('utf8')
+        return JSONResponse({
+            "outbound_ip": ip,
+            "message": "Add this IP to Azure SQL Server firewall rules"
+        })
+    except Exception as e:
+        return JSONResponse({
+            "error": str(e),
+            "message": "Could not determine IP address"
+        })
 
 @app.get("/facets")
 def facets(field: str = Query(...), max_items: int = Query(200)):
@@ -600,120 +721,208 @@ def search(
     if not input_addr:
         raise HTTPException(status_code=400, detail="address parameter required")
     
-    # Get database connection
+    # Get database connection from pool
     try:
-        conn = get_db_connection()
-    except Exception as e:
-        logging.exception("Database connection failed: %s", e)
-        return JSONResponse({"results": [], "error": f"Database connection failed: {str(e)}"})
-    
-    try:
-        # Determine which table(s) to query based on city
-        tables = get_table_name(city)
-        logging.info("SEARCH start | address='%s' city='%s' permit='%s' dates=%s..%s max=%s tables=%s",
-                     input_addr, city, permit, date_from, date_to, max_results, tables)
-        
-        all_results = []
-        cursor = conn.cursor()
-        
-        # Query each table
-        for table in tables:
-            try:
-                # Build SQL query with LIKE on SearchAddress column
-                query_parts = [f"SELECT TOP {max_results} * FROM {table} WHERE SearchAddress LIKE ?"]
-                params = [f"%{input_addr}%"]
-                
-                # Add permit filter if provided
-                if permit:
-                    # Common permit column names
-                    permit_cols = ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
-                    # Try to detect column name by querying table structure
-                    try:
-                        cursor.execute(f"SELECT TOP 1 * FROM {table}")
-                        columns = [column[0] for column in cursor.description]
+        with get_db_connection() as conn:
+            # Determine which table(s) to query based on city
+            tables = get_table_name(city)
+            logging.info("SEARCH start | address='%s' city='%s' permit='%s' dates=%s..%s max=%s tables=%s",
+                         input_addr, city, permit, date_from, date_to, max_results, tables)
+            
+            all_results = []
+            cursor = conn.cursor()
+            
+            # Extract address components from input if not provided as separate params
+            if not street_number_q and not street_name_q and not zip_q:
+                street_num, route_text, zip_code = extract_address_components(input_addr)
+                if street_num:
+                    street_number_q = street_num
+                if route_text:
+                    # Try to split route_text into name and type
+                    route_parts = route_text.split()
+                    if len(route_parts) >= 1:
+                        street_name_q = route_parts[0]
+                    if len(route_parts) >= 2:
+                        street_type_q = route_parts[-1]
+                if zip_code:
+                    zip_q = zip_code
+            
+            # Query each table
+            for table in tables:
+                try:
+                    # Get table columns first to check what address fields exist
+                    cursor.execute(f"SELECT TOP 1 * FROM {table}")
+                    columns = [column[0] for column in cursor.description]
+                    
+                    # Find address-related columns
+                    address_cols = []
+                    for col in ["SearchAddress", "OriginalAddress1", "AddressDescription", "Address", "OriginalAddress", "StreetAddress", "PropertyAddress"]:
+                        if col in columns:
+                            address_cols.append(col)
+                    
+                    if not address_cols:
+                        logging.warning("No address columns found in table %s", table)
+                        continue
+                    
+                    # Build flexible address search conditions
+                    address_conditions = []
+                    address_params = []
+                    
+                    # Strategy 1: Use provided address components if available
+                    if street_number_q or street_name_q or zip_q:
+                        logging.info("Using component-based search: street_number=%s, street_name=%s, street_type=%s, street_dir=%s, zip=%s",
+                                    street_number_q, street_name_q, street_type_q, street_dir_q, zip_q)
+                        # Build component-based search patterns
+                        search_patterns = []
+                        
+                        if street_number_q and street_name_q:
+                            # Try variations: "506 Lincoln", "506 N Lincoln", "506 Lincoln Ave"
+                            search_patterns.extend([
+                                f"%{street_number_q} {street_name_q}%",
+                                f"%{street_number_q} N {street_name_q}%",
+                                f"%{street_number_q} S {street_name_q}%",
+                                f"%{street_number_q} E {street_name_q}%",
+                                f"%{street_number_q} W {street_name_q}%",
+                                f"%{street_number_q}%{street_name_q}%",  # No space between
+                            ])
+                            if street_type_q:
+                                search_patterns.extend([
+                                    f"%{street_number_q} {street_name_q} {street_type_q}%",
+                                    f"%{street_number_q} N {street_name_q} {street_type_q}%",
+                                    f"%{street_number_q} {street_name_q} {normalize_suffix(street_type_q)}%",  # Normalized suffix
+                                ])
+                            if street_dir_q:
+                                search_patterns.append(f"%{street_number_q} {street_dir_q} {street_name_q}%")
+                                if street_type_q:
+                                    search_patterns.append(f"%{street_number_q} {street_dir_q} {street_name_q} {street_type_q}%")
+                        
+                        # Also search by zip if provided
+                        if zip_q:
+                            search_patterns.append(f"%{zip_q}%")
+                        
+                        # Build conditions: (col1 LIKE ? OR col2 LIKE ?) for each pattern
+                        if search_patterns:
+                            for pattern in search_patterns:
+                                pattern_conditions = []
+                                for addr_col in address_cols:
+                                    pattern_conditions.append(f"{addr_col} LIKE ?")
+                                    address_params.append(pattern)
+                                if pattern_conditions:
+                                    address_conditions.append(f"({' OR '.join(pattern_conditions)})")
+                    
+                    # Strategy 2: Fallback to full address string search (normalized)
+                    if not address_conditions:
+                        logging.info("Using fallback full-address search for: %s", input_addr)
+                        # Normalize the input address for better matching
+                        normalized_addr = normalize_text(input_addr)
+                        # Remove common words that might not be in DB
+                        normalized_addr = re.sub(r'\b(usa|fl|florida|tampa|miami|orlando)\b', '', normalized_addr, flags=re.IGNORECASE).strip()
+                        logging.info("Normalized address: %s", normalized_addr)
+                        
+                        # Build patterns to try
+                        search_patterns = []
+                        if normalized_addr:
+                            search_patterns.append(normalized_addr)
+                        search_patterns.append(input_addr)
+                        
+                        # Build conditions for each pattern
+                        for pattern in search_patterns:
+                            pattern_conditions = []
+                            for addr_col in address_cols:
+                                pattern_conditions.append(f"{addr_col} LIKE ?")
+                                address_params.append(f"%{pattern}%")
+                            if pattern_conditions:
+                                address_conditions.append(f"({' OR '.join(pattern_conditions)})")
+                    
+                    # Build WHERE clause with OR conditions between patterns
+                    if address_conditions:
+                        where_parts = [f"({' OR '.join(address_conditions)})"]
+                        params = address_params
+                    else:
+                        # Fallback: search all address columns with empty string (shouldn't happen)
+                        where_parts = ["1=0"]  # No results
+                        params = []
+                    
+                    # Add permit filter if provided
+                    if permit:
+                        permit_cols = ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
                         permit_col = None
                         for col in permit_cols:
                             if col in columns:
                                 permit_col = col
                                 break
                         if permit_col:
-                            query_parts.append(f"AND {permit_col} = ?")
+                            where_parts.append(f"AND {permit_col} = ?")
                             params.append(permit)
-                    except:
-                        pass  # If detection fails, skip permit filter
-                
-                # Add date filters if provided
-                date_col = None
-                if date_from or date_to:
-                    try:
-                        cursor.execute(f"SELECT TOP 1 * FROM {table}")
-                        columns = [column[0] for column in cursor.description]
+                    
+                    # Add date filters if provided
+                    date_col = None
+                    if date_from or date_to:
                         for col in ["AppliedDate", "ApplicationDate", "DateApplied", "Date"]:
                             if col in columns:
                                 date_col = col
                                 break
-                    except:
-                        pass
-                
-                if date_from and date_col:
-                    query_parts.append(f"AND {date_col} >= ?")
-                    params.append(date_from)
-                
-                if date_to and date_col:
-                    query_parts.append(f"AND {date_col} <= ?")
-                    params.append(date_to)
-                
-                query = " ".join(query_parts)
-                
-                logging.info("Executing query: %s with params: %s", query, params)
-                cursor.execute(query, params)
-                
-                # Fetch all results and convert to dict
-                columns = [column[0] for column in cursor.description]
-                for row in cursor.fetchall():
-                    rec = {col: (str(val) if val is not None else "") for col, val in zip(columns, row)}
-                    all_results.append(rec)
-                
-                logging.info("Found %d results from table %s", len(all_results), table)
-                
-            except Exception as e:
-                logging.exception("Error querying table %s: %s", table, e)
-                continue
-        
-        # Process results
-        for rec in all_results[:max_results]:
-            rec_id = pick_id_from_record(rec)
-            try:
-                pdf_path = generate_pdf_from_template(rec, str(TEMPLATES_DIR / "certificate-placeholder.html"))
-                token = create_token_for_permit(rec_id)
-                rec["view_url"] = f"/view/{token}"
-                rec["download_url"] = f"/download/{token}.pdf"
-                results.append(rec)
-            except HTTPException as he:
-                logging.exception("PDF generation failed for id=%s: %s", rec_id, he)
-                rec["pdf_error"] = str(he.detail)
-                results.append(rec)
-            except Exception as e:
-                logging.exception("Error processing record %s: %s", rec_id, e)
-                continue
-        
-        dur_ms = int((time.perf_counter() - start_t) * 1000)
-        logging.info("SEARCH done | results=%d duration_ms=%d", len(results), dur_ms)
-        
-        if len(results) == 0:
-            return JSONResponse({
-                "results": [],
-                "message": "Record not found. Your search data is not in records or the provided fields do not match exactly.",
-                "duration_ms": dur_ms
-            })
-        
-        return JSONResponse({"results": results, "duration_ms": dur_ms})
-        
+                    
+                    if date_from and date_col:
+                        where_parts.append(f"AND {date_col} >= ?")
+                        params.append(date_from)
+                    
+                    if date_to and date_col:
+                        where_parts.append(f"AND {date_col} <= ?")
+                        params.append(date_to)
+                    
+                    query = f"SELECT TOP {max_results} * FROM {table} WHERE {' '.join(where_parts)}"
+                    
+                    logging.info("Executing query: %s with params: %s", query, params)
+                    cursor.execute(query, params)
+                    
+                    # Fetch all results and convert to dict
+                    columns = [column[0] for column in cursor.description]
+                    table_results = []
+                    for row in cursor.fetchall():
+                        rec = {col: (str(val) if val is not None else "") for col, val in zip(columns, row)}
+                        table_results.append(rec)
+                        all_results.append(rec)
+                    
+                    logging.info("Found %d results from table %s", len(table_results), table)
+                    
+                except Exception as e:
+                    logging.exception("Error querying table %s: %s", table, e)
+                    continue
+            
+            # Process results
+            for rec in all_results[:max_results]:
+                rec_id = pick_id_from_record(rec)
+                try:
+                    pdf_path = generate_pdf_from_template(rec, str(TEMPLATES_DIR / "certificate-placeholder.html"))
+                    token = create_token_for_permit(rec_id)
+                    rec["view_url"] = f"/view/{token}"
+                    rec["download_url"] = f"/download/{token}.pdf"
+                    results.append(rec)
+                except HTTPException as he:
+                    logging.exception("PDF generation failed for id=%s: %s", rec_id, he)
+                    rec["pdf_error"] = str(he.detail)
+                    results.append(rec)
+                except Exception as e:
+                    logging.exception("Error processing record %s: %s", rec_id, e)
+                    continue
+            
+            dur_ms = int((time.perf_counter() - start_t) * 1000)
+            logging.info("SEARCH done | results=%d duration_ms=%d", len(results), dur_ms)
+            
+            if len(results) == 0:
+                return JSONResponse({
+                    "results": [],
+                    "message": "Record not found. Your search data is not in records or the provided fields do not match exactly.",
+                    "duration_ms": dur_ms
+                })
+            
+            return JSONResponse({"results": results, "duration_ms": dur_ms})
     except Exception as e:
         logging.exception("Search error: %s", e)
+        if "Database connection failed" in str(e) or "timeout" in str(e).lower():
+            return JSONResponse({"results": [], "error": f"Database connection failed: {str(e)}"})
         return JSONResponse({"results": [], "error": str(e)})
-    finally:
-        conn.close()
 
 # ---------- NEW: record endpoint now generates PDF only if record exists ----------
 @app.get("/record")
