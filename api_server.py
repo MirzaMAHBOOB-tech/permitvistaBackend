@@ -624,6 +624,59 @@ def health():
         "output_container": OUTPUT_CONTAINER
     })
 
+@app.get("/db-info")
+def db_info():
+    """Get database information including indexes"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
+            db_info = {"tables": {}, "indexes": {}}
+
+            for table in tables:
+                try:
+                    # Get table info
+                    cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                    count = cursor.fetchone()[0]
+                    db_info["tables"][table] = {"record_count": count}
+
+                    # Get indexes for address columns
+                    address_cols = ["SearchAddress", "OriginalAddress1", "AddressDescription", "Address"]
+                    table_indexes = {}
+
+                    for col in address_cols:
+                        try:
+                            cursor.execute("""
+                                SELECT i.name AS index_name, i.type_desc, i.is_unique
+                                FROM sys.indexes i
+                                INNER JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                                INNER JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                                WHERE i.object_id = OBJECT_ID(?)
+                                AND c.name = ?
+                                AND i.type_desc != 'HEAP'
+                            """, (table, col))
+
+                            indexes = cursor.fetchall()
+                            if indexes:
+                                table_indexes[col] = [
+                                    {"name": idx[0], "type": idx[1], "is_unique": bool(idx[2])} for idx in indexes
+                                ]
+
+                        except Exception as e:
+                            table_indexes[col] = {"error": str(e)}
+
+                    if table_indexes:
+                        db_info["indexes"][table] = table_indexes
+
+                except Exception as e:
+                    db_info["tables"][table] = {"error": str(e)}
+
+            return JSONResponse(db_info)
+
+    except Exception as e:
+        return JSONResponse({"error": str(e)})
+
 @app.get("/db-health")
 def db_health():
     """Check database health, indexes, and table statistics"""
@@ -810,12 +863,22 @@ def search(
                 if street_num:
                     street_number_q = street_num
                 if route_text:
-                    # Try to split route_text into name and type
+                    # Better parsing of route_text: "n lincoln ave" -> street_name="lincoln", street_type="ave"
                     route_parts = route_text.split()
-                    if len(route_parts) >= 1:
+
+                    # Handle directional prefix: "n lincoln" -> direction="n", name="lincoln"
+                    if len(route_parts) >= 2 and route_parts[0].lower() in ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']:
+                        street_dir_q = route_parts[0].upper()
+                        street_name_q = route_parts[1]
+                        # Rest might be street type
+                        if len(route_parts) >= 3:
+                            street_type_q = route_parts[2]
+                    else:
+                        # No directional prefix: "lincoln ave" -> name="lincoln", type="ave"
                         street_name_q = route_parts[0]
-                    if len(route_parts) >= 2:
-                        street_type_q = route_parts[-1]
+                        if len(route_parts) >= 2:
+                            street_type_q = route_parts[1]
+
                 if zip_code:
                     zip_q = zip_code
 
@@ -945,15 +1008,6 @@ def search(
                             where_parts.append(f"({' OR '.join(zip_conditions)})")
 
                     logging.debug("Address/Zip conditions: %d parts with %d params", len(where_parts), len(params))
-
-                    # Build WHERE clause
-                    if address_conditions:
-                        # Use OR between different search patterns
-                        where_parts = [f"({' OR '.join(address_conditions)})"]
-                        params = address_params
-                    else:
-                        where_parts = ["1=0"]  # No results
-                        params = []
 
                     # Step 3: Permit number filter (strict match if provided)
                     if permit:
