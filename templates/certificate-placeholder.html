@@ -251,7 +251,11 @@
           <tbody>
             <tr>
               <td style="padding:14px; color:#374151; font-size:18px; font-weight:580;line-height:1.5;">
-                DEMOLITION and replacement of necessary slab (approx. 30 SF) to replace existing cast iron sewer lines under the slab for kitchen and bathroom fixtures (sink, toilet, tub). Extend the new Schedual 40 PVC sanitary system to the city sewer connection in front of the home. This includes replacing the existing cast iron tub with a new teel tub. Post-inspection steps include backfill, compacting, termite treatment, slab prep (visqueen/wire), and concrete pour. All work complies with 2020 FBC, 7th Edition.
+                {% if work_description %}
+                  {{ work_description }}
+                {% else %}
+                  Work description not available.
+                {% endif %}
               </td>
             </tr>
           </tbody>

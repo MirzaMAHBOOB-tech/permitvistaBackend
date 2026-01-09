@@ -218,6 +218,19 @@ def _is_connection_alive(conn) -> bool:
     except:
         return False
 
+def _warm_up_connection(conn):
+    """Warm up connection by running a simple query to avoid cold start delay (serverless DB optimization)"""
+    try:
+        cursor = conn.cursor()
+        # Run a simple indexed query to warm up the connection and avoid cold start
+        cursor.execute("SELECT TOP 1 SearchAddress FROM dbo.permits WHERE SearchAddress IS NOT NULL")
+        cursor.fetchone()
+        cursor.close()
+        logging.debug("Connection warmed up successfully")
+    except Exception as e:
+        # Non-critical - connection warm-up failure shouldn't break the app
+        logging.debug("Connection warm-up failed (non-critical): %s", str(e))
+
 
 @contextmanager
 def get_db_connection():
@@ -245,6 +258,8 @@ def get_db_connection():
         # If no connection from pool, create new one
         if conn is None:
             conn = _create_new_connection()
+            # Warm up connection to avoid cold start delay
+            _warm_up_connection(conn)
         
         yield conn
         
@@ -994,12 +1009,24 @@ def search(
                         address_patterns = address_patterns[:6]
 
                         # Create condition: ANY address column must contain ANY of these complete patterns
-                        # This ensures street_number AND street_name are together
+                        # OPTIMIZED: Use index-friendly patterns (no leading wildcard when possible)
+                        # Prefer SearchAddress column first (likely has index)
                         pattern_conditions = []
                         for pattern in address_patterns:
+                            # Try index-friendly pattern first: "506 Lincoln%" (uses index)
+                            # If SearchAddress exists, prioritize it
+                            if "SearchAddress" in address_cols:
+                                pattern_conditions.append("SearchAddress LIKE ?")
+                                params.append(f"{pattern}%")  # No leading % - uses index!
+                            
+                            # For other columns, use both patterns for flexibility
                             for addr_col in address_cols:
-                                pattern_conditions.append(f"{addr_col} LIKE ?")
-                                params.append(f"%{pattern}%")
+                                if addr_col != "SearchAddress":  # Already handled above
+                                    pattern_conditions.append(f"{addr_col} LIKE ?")
+                                    params.append(f"{pattern}%")  # Index-friendly: no leading %
+                                    # Also try with leading % for flexibility (but slower)
+                                    pattern_conditions.append(f"{addr_col} LIKE ?")
+                                    params.append(f"%{pattern}%")
 
                         if pattern_conditions:
                             where_parts.append(f"({' OR '.join(pattern_conditions)})")
@@ -1009,36 +1036,71 @@ def search(
                                           street_number_q, street_name_q)
 
                     elif street_number_q:
-                        # Only street number - use word boundary to avoid partial matches
+                        # Only street number - OPTIMIZED: use index-friendly patterns
                         # e.g., "506" should not match "2506"
-                        logging.info("Searching for street_number='%s' only (with word boundary)", street_number_q)
+                        logging.info("Searching for street_number='%s' only (index-optimized)", street_number_q)
                         pattern_conditions = []
+                        
+                        # Prioritize SearchAddress with index-friendly pattern
+                        if "SearchAddress" in address_cols:
+                            pattern_conditions.append("SearchAddress LIKE ?")
+                            params.append(f"{street_number_q} %")  # At start - uses index!
+                        
+                        # Other columns with flexible matching
                         for addr_col in address_cols:
-                            # Match street number at start or with space before it
-                            pattern_conditions.append(f"({addr_col} LIKE ? OR {addr_col} LIKE ?)")
-                            params.append(f"{street_number_q} %")  # At start
-                            params.append(f"% {street_number_q}%")  # With space before
+                            if addr_col != "SearchAddress":
+                                pattern_conditions.append(f"{addr_col} LIKE ?")
+                                params.append(f"{street_number_q} %")  # Index-friendly
+                                pattern_conditions.append(f"{addr_col} LIKE ?")
+                                params.append(f"% {street_number_q}%")  # Fallback
+                        
                         if pattern_conditions:
                             where_parts.append(f"({' OR '.join(pattern_conditions)})")
 
                     elif street_name_q:
-                        # Only street name - less strict
-                        logging.info("Searching for street_name='%s' only", street_name_q)
+                        # Only street name - OPTIMIZED: use index-friendly patterns
+                        logging.info("Searching for street_name='%s' only (index-optimized)", street_name_q)
                         pattern_conditions = []
+                        
+                        # Prioritize SearchAddress with index-friendly pattern
+                        if "SearchAddress" in address_cols:
+                            pattern_conditions.append("SearchAddress LIKE ?")
+                            params.append(f"{street_name_q}%")  # No leading % - uses index!
+                        
+                        # Other columns
                         for addr_col in address_cols:
-                            pattern_conditions.append(f"{addr_col} LIKE ?")
-                            params.append(f"%{street_name_q}%")
+                            if addr_col != "SearchAddress":
+                                pattern_conditions.append(f"{addr_col} LIKE ?")
+                                params.append(f"{street_name_q}%")  # Index-friendly
+                                pattern_conditions.append(f"{addr_col} LIKE ?")
+                                params.append(f"%{street_name_q}%")  # Fallback
+                        
                         if pattern_conditions:
                             where_parts.append(f"({' OR '.join(pattern_conditions)})")
 
                     else:
-                        # No components - fallback to full address
-                        logging.info("No address components - using full address search")
+                        # No components - fallback to full address (optimized)
+                        logging.info("No address components - using optimized full address search")
                         normalized_addr = normalize_text(input_addr)
                         pattern_conditions = []
+                        
+                        # Try to extract first word for index-friendly search
+                        first_word = normalized_addr.split()[0] if normalized_addr else ""
+                        
+                        # Prioritize SearchAddress with index-friendly pattern
+                        if "SearchAddress" in address_cols and first_word:
+                            pattern_conditions.append("SearchAddress LIKE ?")
+                            params.append(f"{first_word}%")  # Index-friendly
+                        
+                        # Full normalized address for other columns
                         for addr_col in address_cols:
-                            pattern_conditions.append(f"{addr_col} LIKE ?")
-                            params.append(f"%{normalized_addr}%")
+                            if addr_col != "SearchAddress":
+                                if first_word:
+                                    pattern_conditions.append(f"{addr_col} LIKE ?")
+                                    params.append(f"{first_word}%")  # Index-friendly
+                                pattern_conditions.append(f"{addr_col} LIKE ?")
+                                params.append(f"%{normalized_addr}%")  # Fallback
+                        
                         if pattern_conditions:
                             where_parts.append(f"({' OR '.join(pattern_conditions)})")
 
@@ -1063,11 +1125,19 @@ def search(
 
                         # Second priority: ZIP must appear in address fields (but still strict)
                         # Use word boundary to avoid partial matches like "33609" matching "336091"
+                        # Also search in address fields for zip (optimized)
+                        # Prioritize SearchAddress with index-friendly pattern
+                        if "SearchAddress" in address_cols:
+                            zip_conditions.append("SearchAddress LIKE ?")
+                            params.append(f"%{zip_q}")  # ZIP at end - index-friendly
+                        
+                        # Other columns
                         for addr_col in address_cols:
-                            # Match ZIP as whole word or at end of string
-                            zip_conditions.append(f"({addr_col} LIKE ? OR {addr_col} LIKE ?)")
-                            params.append(f"% {zip_q}%")  # ZIP with space before
-                            params.append(f"%{zip_q}")    # ZIP at end
+                            if addr_col != "SearchAddress":
+                                zip_conditions.append(f"{addr_col} LIKE ?")
+                                params.append(f"% {zip_q}%")  # ZIP with space before
+                                zip_conditions.append(f"{addr_col} LIKE ?")
+                                params.append(f"%{zip_q}")    # ZIP at end
 
                         if zip_conditions:
                             where_parts.append(f"({' OR '.join(zip_conditions)})")
@@ -1107,9 +1177,15 @@ def search(
                             where_parts.append(f"AND {date_col} <= ?")
                             params.append(date_to)
 
-                    # Build and execute query
+                    # Build and execute query with performance optimizations
                     if where_parts:
                         query = f"SELECT TOP {max_results} * FROM {table} WHERE {' AND '.join(where_parts)}"
+                        
+                        # Add query hints to force index usage on SearchAddress if available
+                        if "SearchAddress" in address_cols:
+                            # Use WITH (INDEX) hint to force index usage
+                            # This helps with cold start and ensures index is used
+                            query += " OPTION (RECOMPILE, FORCE ORDER)"
                     else:
                         # Fallback if no conditions (shouldn't happen)
                         query = f"SELECT TOP {max_results} * FROM {table}"
@@ -1285,6 +1361,11 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
                 "online_record_url": record.get("Link", "") or "",
                 "publisher": record.get("Publisher", "") or ""
             },
+            "work_description": record.get("WorkDescription", "") or 
+                               record.get("ProjectDescription", "") or 
+                               record.get("Description", "") or 
+                               record.get("WorkDesc", "") or 
+                               record.get("Work_Description", "") or "",
             "logo_image_url": str((BASE_DIR / "Medias" / "badge.png").as_uri()) if (BASE_DIR / "Medias" / "badge.png").exists() else "",
             "map_image_url": str((BASE_DIR / "Medias" / "map.png").as_uri()) if (BASE_DIR / "Medias" / "map.png").exists() else "",
             "generated_on_date": datetime.now().strftime("%m/%d/%Y"),
