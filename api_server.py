@@ -1468,14 +1468,24 @@ async def generate_pdf_for_record(request: Request):
 
             for table in tables:
                 try:
-                    permit_cols = ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
-                    for col in permit_cols:
-                        cursor.execute(f"SELECT TOP 1 * FROM {table} WHERE {col} = ?", (permit_id,))
-                        row = cursor.fetchone()
-                        if row:
-                            columns = [column[0] for column in cursor.description]
-                            record = {col: (str(val) if val is not None else "") for col, val in zip(columns, row)}
-                            break
+                    # First, get column names to check what's available
+                    cursor.execute(f"SELECT TOP 1 * FROM {table}")
+                    columns = [column[0] for column in cursor.description]
+                    
+                    # Try all ID candidate columns
+                    id_cols = ID_CANDIDATES + ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
+                    for col in id_cols:
+                        if col in columns:
+                            try:
+                                cursor.execute(f"SELECT TOP 1 * FROM {table} WHERE {col} = ?", (permit_id,))
+                                row = cursor.fetchone()
+                                if row:
+                                    record = {c: (str(val) if val is not None else "") for c, val in zip(columns, row)}
+                                    logging.info("Found record in table %s using column %s", table, col)
+                                    break
+                            except Exception as e:
+                                logging.debug("Error querying column %s in table %s: %s", col, table, e)
+                                continue
                     if record:
                         break
                 except Exception as e:
@@ -1483,7 +1493,8 @@ async def generate_pdf_for_record(request: Request):
                     continue
 
             if not record:
-                raise HTTPException(status_code=404, detail="Record not found")
+                logging.warning("Record not found for permit_id=%s in any table", permit_id)
+                raise HTTPException(status_code=404, detail=f"Record not found for ID: {permit_id}")
 
             # Generate PDF
             pdf_start = time.perf_counter()
