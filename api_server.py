@@ -1053,6 +1053,7 @@ def search(
     """
     start_t = time.perf_counter()
     results: List[dict] = []
+    all_results: List[dict] = []  # Initialize here to ensure it's in scope
     
     # Validate address parameter
     input_addr = (address or "").strip()
@@ -1411,6 +1412,7 @@ def search(
             
             # Return results WITHOUT generating PDFs (PDF generation happens on-demand)
             # Just prepare basic record data for display
+            logging.info("Processing %d records from all_results", len(all_results))
             for rec in all_results[:max_results]:
                 rec_id = pick_id_from_record(rec)
                 # Add basic display fields without generating PDF
@@ -1425,16 +1427,18 @@ def search(
                 results.append(rec)
             
             dur_ms = int((time.perf_counter() - start_t) * 1000)
-            logging.info("SEARCH done | results=%d duration_ms=%d | components: street_num='%s', street_name='%s', zip='%s', permit='%s'",
-                         len(results), dur_ms, street_number_q, street_name_q, zip_q, permit)
+            logging.info("SEARCH done | all_results=%d | results=%d duration_ms=%d | components: street_num='%s', street_name='%s', zip='%s', permit='%s'",
+                         len(all_results), len(results), dur_ms, street_number_q, street_name_q, zip_q, permit)
             
             if len(results) == 0:
+                logging.warning("No results to return - all_results had %d records but results list is empty", len(all_results))
                 return JSONResponse({
                     "results": [],
                     "message": "Record not found. Your search data is not in records or the provided fields do not match exactly.",
                     "duration_ms": dur_ms
                 })
             
+            logging.info("Returning %d results to frontend", len(results))
             return JSONResponse({"results": results, "duration_ms": dur_ms, "total_found": len(results)})
     except Exception as e:
         logging.exception("Search error: %s", e)
