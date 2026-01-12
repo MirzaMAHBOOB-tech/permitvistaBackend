@@ -1,6 +1,6 @@
 # api_server.py
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
@@ -20,6 +20,7 @@ import webbrowser
 from typing import Optional, List, Tuple
 import re
 import secrets
+import json
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -835,6 +836,193 @@ def get_local_pdf_path_if_exists(permit_id: str) -> Optional[str]:
     p = tmp_pdf_path_for_id(permit_id)
     return p if os.path.exists(p) else None
 
+@app.get("/search-stream")
+def search_stream(
+    address: str = Query(..., min_length=3),
+    city: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    max_results: int = Query(200),
+    permit: Optional[str] = Query(None),
+    street_number_q: Optional[str] = Query(None),
+    street_name_q: Optional[str] = Query(None),
+    street_type_q: Optional[str] = Query(None),
+    street_dir_q: Optional[str] = Query(None),
+    zip_q: Optional[str] = Query(None)
+):
+    """
+    Streaming search endpoint that sends results incrementally as they're found.
+    Uses Server-Sent Events (SSE) to stream results to frontend in real-time.
+    """
+    def generate():
+        try:
+            input_addr = (address or "").strip()
+            if not input_addr:
+                yield f"data: {json.dumps({'error': 'address parameter required'})}\n\n"
+                return
+
+            with get_db_connection() as conn:
+                tables = get_table_name(city)
+                cursor = conn.cursor()
+                all_results = []
+                result_count = 0
+
+                # Extract address components
+                if not street_number_q and not street_name_q and not zip_q:
+                    street_num, route_text, zip_code = extract_address_components(input_addr)
+                    if street_num:
+                        street_number_q = street_num
+                    if route_text:
+                        route_parts = [p for p in route_text.split() if p]
+                        if len(route_parts) >= 1:
+                            first_part = route_parts[0].lower()
+                            direction_map = {
+                                'n': 'N', 's': 'S', 'e': 'E', 'w': 'W',
+                                'ne': 'NE', 'nw': 'NW', 'se': 'SE', 'sw': 'SW',
+                                'north': 'N', 'south': 'S', 'east': 'E', 'west': 'W'
+                            }
+                            if first_part in direction_map:
+                                street_dir_q = direction_map[first_part]
+                                if len(route_parts) >= 2:
+                                    street_name_q = route_parts[1]
+                                if len(route_parts) >= 3:
+                                    street_type_q = route_parts[2]
+                            else:
+                                street_name_q = route_parts[0]
+                                if len(route_parts) >= 2:
+                                    second_part = route_parts[1].lower()
+                                    if second_part in direction_map:
+                                        street_dir_q = direction_map[second_part]
+                                        if len(route_parts) >= 3:
+                                            street_type_q = route_parts[2]
+                                    else:
+                                        street_type_q = route_parts[1]
+                    if zip_code:
+                        zip_q = zip_code
+
+                # Query each table
+                for table in tables:
+                    try:
+                        cursor.execute(f"SELECT TOP 1 * FROM {table}")
+                        columns = [column[0] for column in cursor.description]
+                        address_cols = []
+                        for col in ["SearchAddress", "OriginalAddress1", "AddressDescription", "Address", "OriginalAddress", "StreetAddress", "PropertyAddress"]:
+                            if col in columns:
+                                address_cols.append(col)
+
+                        if not address_cols:
+                            continue
+
+                        # Build query (same logic as regular search)
+                        where_parts = []
+                        params = []
+
+                        if street_number_q and street_name_q:
+                            address_patterns = [f"{street_number_q} {street_name_q}"]
+                            if street_dir_q:
+                                address_patterns.append(f"{street_number_q} {street_dir_q} {street_name_q}")
+                            if street_type_q:
+                                address_patterns.append(f"{street_number_q} {street_name_q} {street_type_q}")
+                                if street_dir_q:
+                                    address_patterns.append(f"{street_number_q} {street_dir_q} {street_name_q} {street_type_q}")
+                            if not street_dir_q:
+                                for direction in ['N', 'S', 'E', 'W']:
+                                    address_patterns.append(f"{street_number_q} {direction} {street_name_q}")
+
+                            pattern_conditions = []
+                            for pattern in address_patterns[:6]:
+                                if "SearchAddress" in address_cols:
+                                    pattern_conditions.append("SearchAddress LIKE ?")
+                                    params.append(f"{pattern}%")
+                                for addr_col in address_cols:
+                                    if addr_col != "SearchAddress":
+                                        pattern_conditions.append(f"{addr_col} LIKE ?")
+                                        params.append(f"{pattern}%")
+
+                            if pattern_conditions:
+                                where_parts.append(f"({' OR '.join(pattern_conditions)})")
+
+                        if zip_q:
+                            zip_conditions = []
+                            if "OriginalZip" in columns:
+                                zip_conditions.append("OriginalZip = ?")
+                                params.append(zip_q)
+                            if "ZipCode" in columns:
+                                zip_conditions.append("ZipCode = ?")
+                                params.append(zip_q)
+                            if "SearchAddress" in address_cols:
+                                zip_conditions.append("SearchAddress LIKE ?")
+                                params.append(f"%{zip_q}")
+                            if zip_conditions:
+                                where_parts.append(f"({' OR '.join(zip_conditions)})")
+
+                        if permit:
+                            permit_cols = ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
+                            for col in permit_cols:
+                                if col in columns:
+                                    where_parts.append(f"AND {col} = ?")
+                                    params.append(permit.strip())
+                                    break
+
+                        if date_from:
+                            for col in ["AppliedDate", "ApplicationDate", "DateApplied", "Date"]:
+                                if col in columns:
+                                    where_parts.append(f"AND {col} >= ?")
+                                    params.append(date_from)
+                                    break
+
+                        if date_to:
+                            for col in ["AppliedDate", "ApplicationDate", "DateApplied", "Date"]:
+                                if col in columns:
+                                    where_parts.append(f"AND {col} <= ?")
+                                    params.append(date_to)
+                                    break
+
+                        if where_parts:
+                            query = f"SELECT TOP {max_results} * FROM {table} WHERE {' AND '.join(where_parts)}"
+                            if "SearchAddress" in address_cols:
+                                query += " OPTION (RECOMPILE, FORCE ORDER)"
+
+                            cursor.execute(query, params)
+                            columns = [column[0] for column in cursor.description]
+
+                            # Stream results as they're found
+                            for row in cursor.fetchall():
+                                rec = {col: (str(val) if val is not None else "") for col, val in zip(columns, row)}
+                                rec_id = pick_id_from_record(rec)
+                                
+                                # Prepare record for display
+                                record_data = {
+                                    "record_id": rec_id,
+                                    "permit_number": rec.get("PermitNumber") or rec.get("PermitNum") or rec_id,
+                                    "address": rec.get("SearchAddress") or rec.get("OriginalAddress1") or rec.get("AddressDescription") or "Address not available",
+                                    "city": rec.get("OriginalCity") or rec.get("City") or "",
+                                    "zip": rec.get("OriginalZip") or rec.get("ZipCode") or "",
+                                    "work_description": rec.get("WorkDescription") or rec.get("ProjectDescription") or rec.get("Description") or "",
+                                    "status": rec.get("StatusCurrentMapped") or rec.get("CurrentStatus") or "",
+                                    "applied_date": rec.get("AppliedDate") or rec.get("ApplicationDate") or "",
+                                    "table": table
+                                }
+                                
+                                result_count += 1
+                                all_results.append(rec)
+                                
+                                # Send record immediately via SSE
+                                yield f"data: {json.dumps({'type': 'record', 'data': record_data, 'count': result_count})}\n\n"
+
+                    except Exception as e:
+                        logging.exception("Error querying table %s: %s", table, e)
+                        continue
+
+                # Send completion message
+                yield f"data: {json.dumps({'type': 'complete', 'total': result_count})}\n\n"
+
+        except Exception as e:
+            logging.exception("Streaming search error: %s", e)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
 @app.get("/search")
 def search(
     address: str = Query(..., min_length=3, description="Main search address — REQUIRED (from Google Autocomplete)"),
@@ -1221,22 +1409,20 @@ def search(
                     logging.exception("Error querying table %s: %s", table, e)
                     continue
             
-            # Process results
+            # Return results WITHOUT generating PDFs (PDF generation happens on-demand)
+            # Just prepare basic record data for display
             for rec in all_results[:max_results]:
                 rec_id = pick_id_from_record(rec)
-                try:
-                    pdf_path = generate_pdf_from_template(rec, str(TEMPLATES_DIR / "certificate-placeholder.html"))
-                    token = create_token_for_permit(rec_id)
-                    rec["view_url"] = f"/view/{token}"
-                    rec["download_url"] = f"/download/{token}.pdf"
-                    results.append(rec)
-                except HTTPException as he:
-                    logging.exception("PDF generation failed for id=%s: %s", rec_id, he)
-                    rec["pdf_error"] = str(he.detail)
-                    results.append(rec)
-                except Exception as e:
-                    logging.exception("Error processing record %s: %s", rec_id, e)
-                    continue
+                # Add basic display fields without generating PDF
+                rec["record_id"] = rec_id
+                rec["permit_number"] = rec.get("PermitNumber") or rec.get("PermitNum") or rec_id
+                rec["address"] = rec.get("SearchAddress") or rec.get("OriginalAddress1") or rec.get("AddressDescription") or "Address not available"
+                rec["city"] = rec.get("OriginalCity") or rec.get("City") or ""
+                rec["zip"] = rec.get("OriginalZip") or rec.get("ZipCode") or ""
+                rec["work_description"] = rec.get("WorkDescription") or rec.get("ProjectDescription") or rec.get("Description") or ""
+                rec["status"] = rec.get("StatusCurrentMapped") or rec.get("CurrentStatus") or ""
+                rec["applied_date"] = rec.get("AppliedDate") or rec.get("ApplicationDate") or ""
+                results.append(rec)
             
             dur_ms = int((time.perf_counter() - start_t) * 1000)
             logging.info("SEARCH done | results=%d duration_ms=%d | components: street_num='%s', street_name='%s', zip='%s', permit='%s'",
@@ -1249,7 +1435,7 @@ def search(
                     "duration_ms": dur_ms
                 })
             
-            return JSONResponse({"results": results, "duration_ms": dur_ms})
+            return JSONResponse({"results": results, "duration_ms": dur_ms, "total_found": len(results)})
     except Exception as e:
         logging.exception("Search error: %s", e)
         if "Database connection failed" in str(e) or "timeout" in str(e).lower():
@@ -1257,6 +1443,65 @@ def search(
         return JSONResponse({"results": [], "error": str(e)})
 
 # ---------- NEW: record endpoint now generates PDF only if record exists ----------
+@app.post("/generate-pdf")
+async def generate_pdf_for_record(request: Request):
+    """
+    Fast PDF generation endpoint for a specific record.
+    Called when user clicks on a record card.
+    Should complete in <1 second.
+    """
+    try:
+        record_data = await request.json()
+        permit_id = record_data.get("record_id") or record_data.get("permit_number")
+        if not permit_id:
+            raise HTTPException(status_code=400, detail="record_id or permit_number required")
+
+        # Find record in database
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
+            record = None
+
+            for table in tables:
+                try:
+                    permit_cols = ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
+                    for col in permit_cols:
+                        cursor.execute(f"SELECT TOP 1 * FROM {table} WHERE {col} = ?", (permit_id,))
+                        row = cursor.fetchone()
+                        if row:
+                            columns = [column[0] for column in cursor.description]
+                            record = {col: (str(val) if val is not None else "") for col, val in zip(columns, row)}
+                            break
+                    if record:
+                        break
+                except Exception as e:
+                    logging.debug("Error searching table %s: %s", table, e)
+                    continue
+
+            if not record:
+                raise HTTPException(status_code=404, detail="Record not found")
+
+            # Generate PDF
+            pdf_start = time.perf_counter()
+            pdf_path = generate_pdf_from_template(record, str(TEMPLATES_DIR / "certificate-placeholder.html"))
+            pdf_time = time.perf_counter() - pdf_start
+
+            rec_id = pick_id_from_record(record)
+            token = create_token_for_permit(rec_id)
+            
+            logging.info("PDF generated in %.2fms for record %s", pdf_time * 1000, rec_id)
+
+            return JSONResponse({
+                "success": True,
+                "view_url": f"/view/{token}",
+                "download_url": f"/download/{token}.pdf",
+                "generation_time_ms": int(pdf_time * 1000)
+            })
+
+    except Exception as e:
+        logging.exception("PDF generation error: %s", e)
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+
 @app.get("/record")
 def get_record(permit_id: str = Query(...)):
     if not permit_id or not permit_id.strip():
