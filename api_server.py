@@ -856,6 +856,13 @@ def search_stream(
     """
     def generate():
         try:
+            # Create local variables from function parameters
+            local_street_number_q = street_number_q
+            local_street_name_q = street_name_q
+            local_street_type_q = street_type_q
+            local_street_dir_q = street_dir_q
+            local_zip_q = zip_q
+            
             input_addr = (address or "").strip()
             if not input_addr:
                 yield f"data: {json.dumps({'error': 'address parameter required'})}\n\n"
@@ -867,11 +874,11 @@ def search_stream(
                 all_results = []
                 result_count = 0
 
-                # Extract address components
-                if not street_number_q and not street_name_q and not zip_q:
+                # Extract address components if not provided
+                if not local_street_number_q and not local_street_name_q and not local_zip_q:
                     street_num, route_text, zip_code = extract_address_components(input_addr)
                     if street_num:
-                        street_number_q = street_num
+                        local_street_number_q = street_num
                     if route_text:
                         route_parts = [p for p in route_text.split() if p]
                         if len(route_parts) >= 1:
@@ -882,23 +889,23 @@ def search_stream(
                                 'north': 'N', 'south': 'S', 'east': 'E', 'west': 'W'
                             }
                             if first_part in direction_map:
-                                street_dir_q = direction_map[first_part]
+                                local_street_dir_q = direction_map[first_part]
                                 if len(route_parts) >= 2:
-                                    street_name_q = route_parts[1]
+                                    local_street_name_q = route_parts[1]
                                 if len(route_parts) >= 3:
-                                    street_type_q = route_parts[2]
+                                    local_street_type_q = route_parts[2]
                             else:
-                                street_name_q = route_parts[0]
+                                local_street_name_q = route_parts[0]
                                 if len(route_parts) >= 2:
                                     second_part = route_parts[1].lower()
                                     if second_part in direction_map:
-                                        street_dir_q = direction_map[second_part]
+                                        local_street_dir_q = direction_map[second_part]
                                         if len(route_parts) >= 3:
-                                            street_type_q = route_parts[2]
+                                            local_street_type_q = route_parts[2]
                                     else:
-                                        street_type_q = route_parts[1]
+                                        local_street_type_q = route_parts[1]
                     if zip_code:
-                        zip_q = zip_code
+                        local_zip_q = zip_code
 
                 # Query each table
                 for table in tables:
@@ -917,17 +924,17 @@ def search_stream(
                         where_parts = []
                         params = []
 
-                        if street_number_q and street_name_q:
-                            address_patterns = [f"{street_number_q} {street_name_q}"]
-                            if street_dir_q:
-                                address_patterns.append(f"{street_number_q} {street_dir_q} {street_name_q}")
-                            if street_type_q:
-                                address_patterns.append(f"{street_number_q} {street_name_q} {street_type_q}")
-                                if street_dir_q:
-                                    address_patterns.append(f"{street_number_q} {street_dir_q} {street_name_q} {street_type_q}")
-                            if not street_dir_q:
+                        if local_street_number_q and local_street_name_q:
+                            address_patterns = [f"{local_street_number_q} {local_street_name_q}"]
+                            if local_street_dir_q:
+                                address_patterns.append(f"{local_street_number_q} {local_street_dir_q} {local_street_name_q}")
+                            if local_street_type_q:
+                                address_patterns.append(f"{local_street_number_q} {local_street_name_q} {local_street_type_q}")
+                                if local_street_dir_q:
+                                    address_patterns.append(f"{local_street_number_q} {local_street_dir_q} {local_street_name_q} {local_street_type_q}")
+                            if not local_street_dir_q:
                                 for direction in ['N', 'S', 'E', 'W']:
-                                    address_patterns.append(f"{street_number_q} {direction} {street_name_q}")
+                                    address_patterns.append(f"{local_street_number_q} {direction} {local_street_name_q}")
 
                             pattern_conditions = []
                             for pattern in address_patterns[:6]:
@@ -942,17 +949,17 @@ def search_stream(
                             if pattern_conditions:
                                 where_parts.append(f"({' OR '.join(pattern_conditions)})")
 
-                        if zip_q:
+                        if local_zip_q:
                             zip_conditions = []
                             if "OriginalZip" in columns:
                                 zip_conditions.append("OriginalZip = ?")
-                                params.append(zip_q)
+                                params.append(local_zip_q)
                             if "ZipCode" in columns:
                                 zip_conditions.append("ZipCode = ?")
-                                params.append(zip_q)
+                                params.append(local_zip_q)
                             if "SearchAddress" in address_cols:
                                 zip_conditions.append("SearchAddress LIKE ?")
-                                params.append(f"%{zip_q}")
+                                params.append(f"%{local_zip_q}")
                             if zip_conditions:
                                 where_parts.append(f"({' OR '.join(zip_conditions)})")
 
