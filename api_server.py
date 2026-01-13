@@ -283,19 +283,57 @@ def get_db_connection():
             except:
                 pass
 
-def get_table_name(city: Optional[str]) -> List[str]:
-    """Determine which table(s) to query based on city parameter"""
-    city_lower = (city or "").strip().lower()
+# Configuration: All permit tables (easy to add more in future)
+ALL_TABLES = [
+    "dbo.permits",           # Tampa
+    "dbo.miami_permits",     # Miami-Dade
+    "dbo.orlando_permits"    # Orlando/Orange County
+]
+
+def get_table_name(city: Optional[str] = None, address: Optional[str] = None) -> List[str]:
+    """
+    Smart table detection with multiple strategies:
+    1. If city explicitly provided -> return specific table
+    2. If address contains city/county name -> detect and route to specific table
+    3. Otherwise -> query ALL tables (most comprehensive, ensures no results missed)
     
-    if "tampa" in city_lower:
-        return ["dbo.permits"]
-    elif "miami" in city_lower:
-        return ["dbo.miami_permits"]
-    elif "orlando" in city_lower:
-        return ["dbo.orlando_permits"]
-    else:
-        # If no city specified, search all tables
-        return ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
+    This approach is scalable: just add new tables to ALL_TABLES list.
+    """
+    # Priority 1: Explicit city parameter (most reliable)
+    if city:
+        city_lower = city.strip().lower()
+        if "tampa" in city_lower:
+            logging.info("Table detection: Using Tampa table (from city parameter)")
+            return ["dbo.permits"]
+        elif "miami" in city_lower or "dade" in city_lower:
+            logging.info("Table detection: Using Miami table (from city parameter)")
+            return ["dbo.miami_permits"]
+        elif "orlando" in city_lower or "orange" in city_lower:
+            logging.info("Table detection: Using Orlando table (from city parameter)")
+            return ["dbo.orlando_permits"]
+    
+    # Priority 2: Detect from address if no city provided (smart detection)
+    if address:
+        addr_lower = address.lower()
+        
+        # Check for Miami-Dade indicators
+        if "miami" in addr_lower or "dade" in addr_lower or "miami-dade" in addr_lower:
+            logging.info("Table detection: Using Miami table (detected from address: %s)", address[:50])
+            return ["dbo.miami_permits"]
+        
+        # Check for Orlando/Orange County indicators
+        if "orlando" in addr_lower or "orange" in addr_lower or "orange county" in addr_lower:
+            logging.info("Table detection: Using Orlando table (detected from address: %s)", address[:50])
+            return ["dbo.orlando_permits"]
+        
+        # Check for Tampa indicators
+        if "tampa" in addr_lower or "hillsborough" in addr_lower:
+            logging.info("Table detection: Using Tampa table (detected from address: %s)", address[:50])
+            return ["dbo.permits"]
+    
+    # Priority 3: Default - query ALL tables (most comprehensive, ensures no results missed)
+    logging.info("Table detection: Using ALL tables (no city specified, no city detected in address)")
+    return ALL_TABLES.copy()
 
 # ----------------- Helpers -----------------
 def _read_csv_bytes_from_blob(container_client, blob_name: str) -> Optional[pd.DataFrame]:
@@ -647,7 +685,7 @@ def db_info():
         with get_db_connection() as conn:
             cursor = conn.cursor()
 
-            tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
+            tables = ALL_TABLES
             db_info = {"tables": {}, "indexes": {}}
 
             for table in tables:
@@ -702,7 +740,7 @@ def db_health():
             health_info = {"database_connected": True, "tables": {}, "indexes": {}}
 
             # Check tables
-            for table in ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]:
+            for table in ALL_TABLES:
                 try:
                     # Get row count
                     cursor.execute(f"SELECT COUNT(*) FROM {table}")
@@ -869,7 +907,7 @@ def search_stream(
                 return
 
             with get_db_connection() as conn:
-                tables = get_table_name(city)
+                tables = get_table_name(city=city, address=input_addr)
                 cursor = conn.cursor()
                 all_results = []
                 result_count = 0
@@ -1070,8 +1108,8 @@ def search(
     # Get database connection from pool
     try:
         with get_db_connection() as conn:
-            # Determine which table(s) to query based on city
-            tables = get_table_name(city)
+            # Determine which table(s) to query based on city and address (smart detection)
+            tables = get_table_name(city=city, address=input_addr)
             logging.info("SEARCH start | address='%s' city='%s' permit='%s' dates=%s..%s max=%s tables=%s",
                          input_addr, city, permit, date_from, date_to, max_results, tables)
             
@@ -1470,7 +1508,7 @@ async def generate_pdf_for_record(request: Request):
         # Find record in database
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
+            tables = ALL_TABLES
             record = None
 
             for table in tables:
