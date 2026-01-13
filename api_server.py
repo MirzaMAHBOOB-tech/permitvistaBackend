@@ -1501,9 +1501,13 @@ async def generate_pdf_for_record(request: Request):
     """
     try:
         record_data = await request.json()
-        permit_id = record_data.get("record_id") or record_data.get("permit_number")
+        # Prioritize permit_number over record_id (permit_number is more reliable)
+        permit_id = record_data.get("permit_number") or record_data.get("record_id")
         if not permit_id:
             raise HTTPException(status_code=400, detail="record_id or permit_number required")
+        
+        logging.info("PDF generation request: permit_number=%s, record_id=%s, using permit_id=%s", 
+                     record_data.get("permit_number"), record_data.get("record_id"), permit_id)
 
         # Find record in database
         with get_db_connection() as conn:
@@ -1511,25 +1515,60 @@ async def generate_pdf_for_record(request: Request):
             tables = ALL_TABLES
             record = None
 
+            logging.info("Searching for record with permit_id=%s in tables: %s", permit_id, tables)
+
             for table in tables:
                 try:
                     # First, get column names to check what's available
                     cursor.execute(f"SELECT TOP 1 * FROM {table}")
                     columns = [column[0] for column in cursor.description]
                     
-                    # Try all ID candidate columns
-                    id_cols = ID_CANDIDATES + ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
-                    for col in id_cols:
+                    # PRIORITY 1: Try permit number columns first (most reliable for permit lookups)
+                    permit_cols = ["PermitNumber", "PermitNum", "Permit_Number", "Permit", "ApplicationNumber"]
+                    for col in permit_cols:
                         if col in columns:
                             try:
                                 cursor.execute(f"SELECT TOP 1 * FROM {table} WHERE {col} = ?", (permit_id,))
                                 row = cursor.fetchone()
                                 if row:
                                     record = {c: (str(val) if val is not None else "") for c, val in zip(columns, row)}
-                                    logging.info("Found record in table %s using column %s", table, col)
+                                    logging.info("✅ Found record in table %s using PERMIT column %s with value %s", table, col, permit_id)
+                                    # Log available fields for debugging (first 10 non-empty fields)
+                                    available_fields = [k for k, v in record.items() if v][:10]
+                                    logging.info("Record has %d columns. Sample fields: %s", len(columns), available_fields)
                                     break
                             except Exception as e:
-                                logging.debug("Error querying column %s in table %s: %s", col, table, e)
+                                logging.debug("Error querying permit column %s in table %s: %s", col, table, e)
+                                continue
+                    if record:
+                        break
+                    
+                    # PRIORITY 2: Try ID columns only if permit columns didn't work (fallback)
+                    # Only use ID columns if permit_id looks like a numeric ID
+                    id_cols = ["_id", "ID", "OBJECTID", "FID"]
+                    for col in id_cols:
+                        if col in columns:
+                            try:
+                                # Convert permit_id to appropriate type for ID columns
+                                search_value = permit_id
+                                # If it's a numeric ID column and permit_id is numeric, convert to int
+                                if col in ["ID", "_id", "OBJECTID", "FID"] and str(permit_id).isdigit():
+                                    try:
+                                        search_value = int(permit_id)
+                                    except (ValueError, TypeError):
+                                        search_value = permit_id
+                                
+                                cursor.execute(f"SELECT TOP 1 * FROM {table} WHERE {col} = ?", (search_value,))
+                                row = cursor.fetchone()
+                                if row:
+                                    record = {c: (str(val) if val is not None else "") for c, val in zip(columns, row)}
+                                    logging.info("✅ Found record in table %s using ID column %s with value %s", table, col, search_value)
+                                    # Log available fields for debugging (first 10 non-empty fields)
+                                    available_fields = [k for k, v in record.items() if v][:10]
+                                    logging.info("Record has %d columns. Sample fields: %s", len(columns), available_fields)
+                                    break
+                            except Exception as e:
+                                logging.debug("Error querying ID column %s in table %s: %s", col, table, e)
                                 continue
                     if record:
                         break
@@ -1538,7 +1577,7 @@ async def generate_pdf_for_record(request: Request):
                     continue
 
             if not record:
-                logging.warning("Record not found for permit_id=%s in any table", permit_id)
+                logging.warning("❌ Record not found for permit_id=%s in any table. Searched permit columns first, then ID columns.", permit_id)
                 raise HTTPException(status_code=404, detail=f"Record not found for ID: {permit_id}")
 
             # Generate PDF
