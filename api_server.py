@@ -439,16 +439,35 @@ def normalize_dir(token: str) -> str:
     t = (token or "").lower().strip(". ")
     return DIR_MAP.get(t, t)
 
+def normalize_ordinals(text: str) -> str:
+    """
+    Normalize ordinal suffixes in addresses (e.g., "131st" → "131", "2nd" → "2").
+    This handles Miami address format mismatch where Google returns "131st Ave" 
+    but database stores "131 AVE".
+    """
+    if not text:
+        return text
+    # Pattern to match ordinals: 1st, 2nd, 3rd, 4th, ..., 131st, etc.
+    # Matches: number + (st|nd|rd|th) followed by space or end of word
+    ordinal_pattern = re.compile(r'(\d+)(st|nd|rd|th)\b', re.IGNORECASE)
+    normalized = ordinal_pattern.sub(r'\1', text)  # Replace "131st" with "131"
+    return normalized
+
 def extract_address_components(input_address: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Heuristic extract of (street_number, route_text, zip_code) from a provided address string.
     Handles unit markers (A/B, Apt, Unit, #), trailing directional tokens (N, S, E, W, NE, etc.)
     and common punctuation.
+    Also normalizes ordinal suffixes (131st → 131) for Miami address matching.
     Returns (street_number or None, route_text or None, zip or None)
     """
     if not input_address:
         return None, None, None
     s = input_address.strip()
+    
+    # Normalize ordinals FIRST (before extracting components)
+    # This handles Miami: "7850 SW 131st Ave" → "7850 SW 131 Ave"
+    s = normalize_ordinals(s)
 
     # zip
     zip_match = ZIP_RE.search(s)
@@ -495,9 +514,10 @@ def extract_record_address_components(rec: dict) -> Tuple[Optional[str], Optiona
                 street_number = num_match.group(1).strip()
                 break
     
-    # Extract street name - try OriginalAddress1 first (more reliable, AddressDescription might be a number)
+    # Extract street name - try PermitAddress (Orlando) or OriginalAddress1 (Tampa) first
+    # (more reliable, AddressDescription might be a number)
     street_name = None
-    orig_addr = rec.get("OriginalAddress1") or ""
+    orig_addr = rec.get("PermitAddress") or rec.get("OriginalAddress1") or ""
     if orig_addr:
         # Format is usually: "3110 Chapin Ave W " or "3613 Lindell Ave  "
         cleaned = str(orig_addr).strip()
@@ -590,7 +610,8 @@ def record_address_values(rec: dict) -> List[str]:
             candidates.append(normalize_text(cleaned))
 
     # Common triplet composition attempts
-    addr = rec.get("Address") or rec.get("OriginalAddress") or rec.get("StreetAddress") or rec.get("PropertyAddress") or ""
+    # Include Orlando-specific PermitAddress
+    addr = rec.get("PermitAddress") or rec.get("Address") or rec.get("OriginalAddress") or rec.get("StreetAddress") or rec.get("PropertyAddress") or ""
     city = rec.get("OriginalCity") or rec.get("City") or rec.get("PropertyCity") or ""
     zipc = rec.get("OriginalZip") or rec.get("ZipCode") or rec.get("ZIP") or rec.get("Zip") or ""
     if addr or city or zipc:
@@ -951,7 +972,10 @@ def search_stream(
                         cursor.execute(f"SELECT TOP 1 * FROM {table}")
                         columns = [column[0] for column in cursor.description]
                         address_cols = []
-                        for col in ["SearchAddress", "OriginalAddress1", "AddressDescription", "Address", "OriginalAddress", "StreetAddress", "PropertyAddress"]:
+                        # IMPORTANT: Include table-specific columns:
+                        # - Tampa/Miami: SearchAddress, OriginalAddress1, AddressDescription, Address
+                        # - Orlando: PermitAddress (primary address field)
+                        for col in ["SearchAddress", "PermitAddress", "OriginalAddress1", "AddressDescription", "Address", "OriginalAddress", "StreetAddress", "PropertyAddress"]:
                             if col in columns:
                                 address_cols.append(col)
 
@@ -1037,15 +1061,16 @@ def search_stream(
                                 rec_id = pick_id_from_record(rec)
                                 
                                 # Prepare record for display
+                                # Handle Orlando-specific columns: PermitAddress, ProjectName, Status, IssuePermitDate
                                 record_data = {
                                     "record_id": rec_id,
                                     "permit_number": rec.get("PermitNumber") or rec.get("PermitNum") or rec_id,
-                                    "address": rec.get("SearchAddress") or rec.get("OriginalAddress1") or rec.get("AddressDescription") or "Address not available",
+                                    "address": rec.get("PermitAddress") or rec.get("SearchAddress") or rec.get("OriginalAddress1") or rec.get("AddressDescription") or rec.get("Address") or "Address not available",
                                     "city": rec.get("OriginalCity") or rec.get("City") or "",
                                     "zip": rec.get("OriginalZip") or rec.get("ZipCode") or "",
-                                    "work_description": rec.get("WorkDescription") or rec.get("ProjectDescription") or rec.get("Description") or "",
-                                    "status": rec.get("StatusCurrentMapped") or rec.get("CurrentStatus") or "",
-                                    "applied_date": rec.get("AppliedDate") or rec.get("ApplicationDate") or "",
+                                    "work_description": rec.get("ProjectName") or rec.get("WorkDescription") or rec.get("ProjectDescription") or rec.get("Description") or "",
+                                    "status": rec.get("Status") or rec.get("StatusCurrentMapped") or rec.get("CurrentStatus") or "",
+                                    "applied_date": rec.get("IssuePermitDate") or rec.get("AppliedDate") or rec.get("ApplicationDate") or "",
                                     "table": table
                                 }
                                 
@@ -1189,8 +1214,11 @@ def search(
                     columns = [column[0] for column in cursor.description]
 
                     # Find address-related columns
+                    # IMPORTANT: Include table-specific columns:
+                    # - Tampa/Miami: SearchAddress, OriginalAddress1, AddressDescription, Address
+                    # - Orlando: PermitAddress (primary address field)
                     address_cols = []
-                    for col in ["SearchAddress", "OriginalAddress1", "AddressDescription", "Address", "OriginalAddress", "StreetAddress", "PropertyAddress"]:
+                    for col in ["SearchAddress", "PermitAddress", "OriginalAddress1", "AddressDescription", "Address", "OriginalAddress", "StreetAddress", "PropertyAddress"]:
                         if col in columns:
                             address_cols.append(col)
 
@@ -1208,35 +1236,43 @@ def search(
                                     street_number_q, street_name_q)
 
                         # Build patterns that require BOTH components together (not separate)
+                        # IMPORTANT: Normalize ordinals in patterns for Miami compatibility
+                        # e.g., "131st" → "131" to match database format "131 AVE"
+                        normalized_street_number = normalize_ordinals(street_number_q) if street_number_q else street_number_q
+                        normalized_street_name = normalize_ordinals(street_name_q) if street_name_q else street_name_q
+                        
                         address_patterns = []
 
                         # Primary pattern: "506 Lincoln" (both together)
-                        base_pattern = f"{street_number_q} {street_name_q}"
+                        base_pattern = f"{normalized_street_number} {normalized_street_name}"
                         address_patterns.append(base_pattern)
 
+                        # Normalize street type (uppercase for consistency with database)
+                        normalized_street_type = street_type_q.upper() if street_type_q else None
+                        
                         # With direction if provided: "506 N Lincoln"
                         if street_dir_q:
-                            dir_pattern = f"{street_number_q} {street_dir_q} {street_name_q}"
+                            dir_pattern = f"{normalized_street_number} {street_dir_q} {normalized_street_name}"
                             address_patterns.append(dir_pattern)
 
                         # With street type if provided: "506 Lincoln Ave"
-                        if street_type_q:
-                            type_pattern = f"{street_number_q} {street_name_q} {street_type_q}"
+                        if normalized_street_type:
+                            type_pattern = f"{normalized_street_number} {normalized_street_name} {normalized_street_type}"
                             address_patterns.append(type_pattern)
                             
                             # With both direction and type: "506 N Lincoln Ave"
                             if street_dir_q:
-                                full_pattern = f"{street_number_q} {street_dir_q} {street_name_q} {street_type_q}"
+                                full_pattern = f"{normalized_street_number} {street_dir_q} {normalized_street_name} {normalized_street_type}"
                                 address_patterns.append(full_pattern)
 
                         # Try common directions if no direction specified (but limit to avoid too many patterns)
                         if not street_dir_q:
                             # Only try N, S, E, W (not NE, NW, etc. to keep it focused)
                             for direction in ['N', 'S', 'E', 'W']:
-                                dir_pattern = f"{street_number_q} {direction} {street_name_q}"
+                                dir_pattern = f"{normalized_street_number} {direction} {normalized_street_name}"
                                 address_patterns.append(dir_pattern)
-                                if street_type_q:
-                                    dir_type_pattern = f"{street_number_q} {direction} {street_name_q} {street_type_q}"
+                                if normalized_street_type:
+                                    dir_type_pattern = f"{normalized_street_number} {direction} {normalized_street_name} {normalized_street_type}"
                                     address_patterns.append(dir_type_pattern)
 
                         # Limit patterns to avoid performance issues
@@ -1244,7 +1280,7 @@ def search(
 
                         # Create condition: ANY address column must contain ANY of these complete patterns
                         # OPTIMIZED: Use index-friendly patterns (no leading wildcard when possible)
-                        # Prefer SearchAddress column first (likely has index)
+                        # Prefer SearchAddress/PermitAddress columns first (likely have indexes)
                         pattern_conditions = []
                         for pattern in address_patterns:
                             # Try index-friendly pattern first: "506 Lincoln%" (uses index)
@@ -1252,10 +1288,14 @@ def search(
                             if "SearchAddress" in address_cols:
                                 pattern_conditions.append("SearchAddress LIKE ?")
                                 params.append(f"{pattern}%")  # No leading % - uses index!
+                            # If PermitAddress exists (Orlando), prioritize it too
+                            if "PermitAddress" in address_cols:
+                                pattern_conditions.append("PermitAddress LIKE ?")
+                                params.append(f"{pattern}%")  # No leading % - uses index!
                             
                             # For other columns, use both patterns for flexibility
                             for addr_col in address_cols:
-                                if addr_col != "SearchAddress":  # Already handled above
+                                if addr_col not in ["SearchAddress", "PermitAddress"]:  # Already handled above
                                     pattern_conditions.append(f"{addr_col} LIKE ?")
                                     params.append(f"{pattern}%")  # Index-friendly: no leading %
                                     # Also try with leading % for flexibility (but slower)
@@ -1272,63 +1312,80 @@ def search(
                     elif street_number_q:
                         # Only street number - OPTIMIZED: use index-friendly patterns
                         # e.g., "506" should not match "2506"
-                        logging.info("Searching for street_number='%s' only (index-optimized)", street_number_q)
+                        # Normalize ordinals for Miami compatibility
+                        normalized_street_number = normalize_ordinals(street_number_q)
+                        logging.info("Searching for street_number='%s' (normalized: '%s') only (index-optimized)", 
+                                    street_number_q, normalized_street_number)
                         pattern_conditions = []
                         
-                        # Prioritize SearchAddress with index-friendly pattern
+                        # Prioritize SearchAddress/PermitAddress with index-friendly pattern
                         if "SearchAddress" in address_cols:
                             pattern_conditions.append("SearchAddress LIKE ?")
-                            params.append(f"{street_number_q} %")  # At start - uses index!
+                            params.append(f"{normalized_street_number} %")  # At start - uses index!
+                        if "PermitAddress" in address_cols:
+                            pattern_conditions.append("PermitAddress LIKE ?")
+                            params.append(f"{normalized_street_number} %")  # At start - uses index!
                         
                         # Other columns with flexible matching
                         for addr_col in address_cols:
-                            if addr_col != "SearchAddress":
+                            if addr_col not in ["SearchAddress", "PermitAddress"]:
                                 pattern_conditions.append(f"{addr_col} LIKE ?")
-                                params.append(f"{street_number_q} %")  # Index-friendly
+                                params.append(f"{normalized_street_number} %")  # Index-friendly
                                 pattern_conditions.append(f"{addr_col} LIKE ?")
-                                params.append(f"% {street_number_q}%")  # Fallback
+                                params.append(f"% {normalized_street_number}%")  # Fallback
                         
                         if pattern_conditions:
                             where_parts.append(f"({' OR '.join(pattern_conditions)})")
 
                     elif street_name_q:
                         # Only street name - OPTIMIZED: use index-friendly patterns
-                        logging.info("Searching for street_name='%s' only (index-optimized)", street_name_q)
+                        # Normalize ordinals for Miami compatibility
+                        normalized_street_name = normalize_ordinals(street_name_q)
+                        logging.info("Searching for street_name='%s' (normalized: '%s') only (index-optimized)", 
+                                    street_name_q, normalized_street_name)
                         pattern_conditions = []
                         
-                        # Prioritize SearchAddress with index-friendly pattern
+                        # Prioritize SearchAddress/PermitAddress with index-friendly pattern
                         if "SearchAddress" in address_cols:
                             pattern_conditions.append("SearchAddress LIKE ?")
-                            params.append(f"{street_name_q}%")  # No leading % - uses index!
+                            params.append(f"{normalized_street_name}%")  # No leading % - uses index!
+                        if "PermitAddress" in address_cols:
+                            pattern_conditions.append("PermitAddress LIKE ?")
+                            params.append(f"{normalized_street_name}%")  # No leading % - uses index!
                         
                         # Other columns
                         for addr_col in address_cols:
-                            if addr_col != "SearchAddress":
+                            if addr_col not in ["SearchAddress", "PermitAddress"]:
                                 pattern_conditions.append(f"{addr_col} LIKE ?")
-                                params.append(f"{street_name_q}%")  # Index-friendly
+                                params.append(f"{normalized_street_name}%")  # Index-friendly
                                 pattern_conditions.append(f"{addr_col} LIKE ?")
-                                params.append(f"%{street_name_q}%")  # Fallback
+                                params.append(f"%{normalized_street_name}%")  # Fallback
                         
                         if pattern_conditions:
                             where_parts.append(f"({' OR '.join(pattern_conditions)})")
 
                     else:
                         # No components - fallback to full address (optimized)
-                        logging.info("No address components - using optimized full address search")
-                        normalized_addr = normalize_text(input_addr)
+                        # Normalize ordinals for Miami compatibility
+                        normalized_input = normalize_ordinals(input_addr)
+                        logging.info("No address components - using optimized full address search (normalized ordinals)")
+                        normalized_addr = normalize_text(normalized_input)
                         pattern_conditions = []
                         
                         # Try to extract first word for index-friendly search
                         first_word = normalized_addr.split()[0] if normalized_addr else ""
                         
-                        # Prioritize SearchAddress with index-friendly pattern
+                        # Prioritize SearchAddress/PermitAddress with index-friendly pattern
                         if "SearchAddress" in address_cols and first_word:
                             pattern_conditions.append("SearchAddress LIKE ?")
+                            params.append(f"{first_word}%")  # Index-friendly
+                        if "PermitAddress" in address_cols and first_word:
+                            pattern_conditions.append("PermitAddress LIKE ?")
                             params.append(f"{first_word}%")  # Index-friendly
                         
                         # Full normalized address for other columns
                         for addr_col in address_cols:
-                            if addr_col != "SearchAddress":
+                            if addr_col not in ["SearchAddress", "PermitAddress"]:
                                 if first_word:
                                     pattern_conditions.append(f"{addr_col} LIKE ?")
                                     params.append(f"{first_word}%")  # Index-friendly
@@ -1360,14 +1417,17 @@ def search(
                         # Second priority: ZIP must appear in address fields (but still strict)
                         # Use word boundary to avoid partial matches like "33609" matching "336091"
                         # Also search in address fields for zip (optimized)
-                        # Prioritize SearchAddress with index-friendly pattern
+                        # Prioritize SearchAddress/PermitAddress with index-friendly pattern
                         if "SearchAddress" in address_cols:
                             zip_conditions.append("SearchAddress LIKE ?")
+                            params.append(f"%{zip_q}")  # ZIP at end - index-friendly
+                        if "PermitAddress" in address_cols:
+                            zip_conditions.append("PermitAddress LIKE ?")
                             params.append(f"%{zip_q}")  # ZIP at end - index-friendly
                         
                         # Other columns
                         for addr_col in address_cols:
-                            if addr_col != "SearchAddress":
+                            if addr_col not in ["SearchAddress", "PermitAddress"]:
                                 zip_conditions.append(f"{addr_col} LIKE ?")
                                 params.append(f"% {zip_q}%")  # ZIP with space before
                                 zip_conditions.append(f"{addr_col} LIKE ?")
@@ -1669,14 +1729,17 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
     try:
         logging.info("Starting PDF generation for record %s", permit_id)
 
-        addr1 = record.get("OriginalAddress1", "") or record.get("OriginalAddress", "")
+        # Handle Orlando-specific address field: PermitAddress
+        # Priority: PermitAddress (Orlando) > OriginalAddress1 (Tampa) > Address (Miami)
+        addr1 = record.get("PermitAddress", "") or record.get("OriginalAddress1", "") or record.get("OriginalAddress", "") or record.get("Address", "")
         addr2 = record.get("OriginalAddress2", "")
         property_address = (addr1 + " " + addr2).strip()
 
         # ensure 'other' exists so templates referencing other.* don't break
         ctx = {
             "dates": {
-                "application": record.get("AppliedDate", ""),
+                # Orlando: IssuePermitDate > AppliedDate
+                "application": record.get("IssuePermitDate", "") or record.get("AppliedDate", ""),
                 "completion": record.get("CompletedDate", ""),
                 "expires": record.get("ExpiresDate", ""),
                 "last_updated": record.get("LastUpdated", ""),
@@ -1686,8 +1749,10 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
                 "class": record.get("PermitClass", ""),
                 "classification": record.get("PermitClassMapped", ""),
                 "number": record.get("PermitNum", "") or record.get("PermitNumber", ""),
-                "type": record.get("PermitType", ""),
-                "type_classification": record.get("PermitTypeMapped", ""),
+                # Orlando: StatusDesc > PermitType
+                "type": record.get("StatusDesc", "") or record.get("PermitType", ""),
+                # Orlando: PermitType > PermitTypeMapped
+                "type_classification": record.get("PermitType", "") or record.get("PermitTypeMapped", ""),
                 "id": permit_id,
                 "certificate_number": record.get("certificate_number", "") or record.get("CertificateNo", "") or ""
             },
@@ -1697,15 +1762,20 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
                 "city": record.get("OriginalCity", "") or record.get("City", "") or record.get("PropertyCity", "N/A"),
                 "state": record.get("OriginalState") or record.get("State", ""),
                 "zip_code": record.get("OriginalZip") or record.get("ZipCode", ""),
-                "pin": record.get("PIN", "")
+                # Orlando: Parcel > PIN
+                "pin": record.get("Parcel", "") or record.get("PIN", "")
             },
-            "status_current": record.get("StatusCurrent", ""),
-            "current_status": record.get("StatusCurrentMapped", ""),
+            # Orlando: Status > StatusCurrent
+            "status_current": record.get("Status", "") or record.get("StatusCurrent", ""),
+            # Orlando: Status > StatusCurrentMapped
+            "current_status": record.get("Status", "") or record.get("StatusCurrentMapped", ""),
             "other": {
                 "online_record_url": record.get("Link", "") or "",
                 "publisher": record.get("Publisher", "") or ""
             },
-            "work_description": record.get("WorkDescription", "") or 
+            # Orlando: ProjectName > WorkDescription
+            "work_description": record.get("ProjectName", "") or 
+                               record.get("WorkDescription", "") or 
                                record.get("ProjectDescription", "") or 
                                record.get("Description", "") or 
                                record.get("WorkDesc", "") or 
