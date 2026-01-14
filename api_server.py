@@ -1878,48 +1878,71 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
         # ensure 'other' exists so templates referencing other.* don't break
         ctx = {
             "dates": {
-                # Orlando: IssuePermitDate > AppliedDate
-                "application": record.get("IssuePermitDate", "") or record.get("AppliedDate", ""),
+                # Orlando: IssuePermitDate > AppliedDate > ApplicationDate
+                "application": (record.get("IssuePermitDate", "") or 
+                               record.get("AppliedDate", "") or 
+                               record.get("ApplicationDate", "")),
                 "completion": record.get("CompletedDate", ""),
                 "expires": record.get("ExpiresDate", ""),
                 "last_updated": record.get("LastUpdated", ""),
                 "status_date": record.get("StatusDate", "")
             },
             "permit": {
-                "class": record.get("PermitClass", ""),
+                # Orlando: PermitClass (if exists)
+                "class": record.get("PermitClass", "") or record.get("PermitClassMapped", ""),
                 "classification": record.get("PermitClassMapped", ""),
                 "number": record.get("PermitNum", "") or record.get("PermitNumber", ""),
-                # Orlando: StatusDesc > PermitType
-                "type": record.get("StatusDesc", "") or record.get("PermitType", ""),
-                # Orlando: PermitType > PermitTypeMapped
-                "type_classification": record.get("PermitType", "") or record.get("PermitTypeMapped", ""),
+                # Orlando: StatusDesc > WorkType > ApplicationType > PermitType
+                "type": (record.get("StatusDesc", "") or 
+                        record.get("WorkType", "") or 
+                        record.get("ApplicationType", "") or 
+                        record.get("PermitType", "")),
+                # Orlando: PermitType > PlanReviewType > PermitTypeMapped
+                "type_classification": (record.get("PermitType", "") or 
+                                       record.get("PlanReviewType", "") or 
+                                       record.get("PermitTypeMapped", "")),
                 "id": permit_id,
                 "certificate_number": record.get("certificate_number", "") or record.get("CertificateNo", "") or ""
             },
             "property": {
                 "address_description": record.get("AddressDescription", ""),
                 "address": property_address,
-                "city": record.get("OriginalCity", "") or record.get("City", "") or record.get("PropertyCity", "N/A"),
+                # Orlando: Check all city variations
+                "city": (record.get("OriginalCity", "") or 
+                        record.get("City", "") or 
+                        record.get("PropertyCity", "") or
+                        "N/A"),
                 "state": record.get("OriginalState") or record.get("State", ""),
-                "zip_code": record.get("OriginalZip") or record.get("ZipCode", ""),
-                # Orlando: Parcel > PIN
-                "pin": record.get("Parcel", "") or record.get("PIN", "")
+                # Orlando: Check all ZIP variations
+                "zip_code": (record.get("OriginalZip", "") or 
+                            record.get("ZipCode", "") or 
+                            record.get("ZIP", "") or 
+                            record.get("Zip", "")),
+                # Orlando: ParcelNumber > Parcel > PIN (based on actual table structure)
+                "pin": (record.get("ParcelNumber", "") or 
+                       record.get("Parcel", "") or 
+                       record.get("PIN", ""))
             },
-            # Orlando: Status > StatusCurrent
-            "status_current": record.get("Status", "") or record.get("StatusCurrent", ""),
-            # Orlando: Status > StatusCurrentMapped
-            "current_status": record.get("Status", "") or record.get("StatusCurrentMapped", ""),
+            # Orlando: ApplicationStatus > Status > StatusCurrent
+            "status_current": (record.get("ApplicationStatus", "") or 
+                              record.get("Status", "") or 
+                              record.get("StatusCurrent", "")),
+            # Orlando: ApplicationStatus > Status > StatusCurrentMapped
+            "current_status": (record.get("ApplicationStatus", "") or 
+                              record.get("Status", "") or 
+                              record.get("StatusCurrentMapped", "")),
             "other": {
                 "online_record_url": record.get("Link", "") or "",
                 "publisher": record.get("Publisher", "") or ""
             },
-            # Orlando: ProjectName > WorkDescription
-            "work_description": record.get("ProjectName", "") or 
-                               record.get("WorkDescription", "") or 
-                               record.get("ProjectDescription", "") or 
-                               record.get("Description", "") or 
-                               record.get("WorkDesc", "") or 
-                               record.get("Work_Description", "") or "",
+            # Orlando: ProjectName > WorkType > WorkDescription (based on actual table structure)
+            "work_description": (record.get("ProjectName", "") or 
+                                record.get("WorkType", "") or
+                                record.get("WorkDescription", "") or 
+                                record.get("ProjectDescription", "") or 
+                                record.get("Description", "") or 
+                                record.get("WorkDesc", "") or 
+                                record.get("Work_Description", "") or ""),
             "logo_image_url": str((BASE_DIR / "Medias" / "badge.png").as_uri()) if (BASE_DIR / "Medias" / "badge.png").exists() else "",
             "map_image_url": str((BASE_DIR / "Medias" / "map.png").as_uri()) if (BASE_DIR / "Medias" / "map.png").exists() else "",
             "generated_on_date": datetime.now().strftime("%m/%d/%Y"),
