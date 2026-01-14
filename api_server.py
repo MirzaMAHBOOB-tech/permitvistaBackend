@@ -1072,28 +1072,30 @@ def search_stream(
                                 # This ensures we get complete data from Tampa, Miami, and Orlando tables
                                 
                                 # Address: Check all possible address columns (table-specific)
-                                address = (rec.get("PermitAddress") or  # Orlando
-                                          rec.get("SearchAddress") or   # Tampa/Miami/Orlando
-                                          rec.get("OriginalAddress1") or # Tampa
-                                          rec.get("AddressDescription") or # Tampa
-                                          rec.get("Address") or         # Miami
-                                          rec.get("OriginalAddress") or
-                                          rec.get("StreetAddress") or
-                                          rec.get("PropertyAddress") or
-                                          "Address not available")
+                                # IMPORTANT: Use different variable name to avoid conflict with outer scope 'address' parameter
+                                record_address = (rec.get("PermitAddress") or  # Orlando
+                                                 rec.get("SearchAddress") or   # Tampa/Miami/Orlando
+                                                 rec.get("OriginalAddress1") or # Tampa
+                                                 rec.get("AddressDescription") or # Tampa
+                                                 rec.get("Address") or         # Miami
+                                                 rec.get("OriginalAddress") or
+                                                 rec.get("StreetAddress") or
+                                                 rec.get("PropertyAddress") or
+                                                 "Address not available")
                                 
                                 # City: Check all variations
-                                city = (rec.get("OriginalCity") or
-                                       rec.get("City") or
-                                       rec.get("PropertyCity") or
-                                       "")
+                                # IMPORTANT: Use different variable name to avoid conflict with outer scope 'city' parameter
+                                record_city = (rec.get("OriginalCity") or
+                                              rec.get("City") or
+                                              rec.get("PropertyCity") or
+                                              "")
                                 
                                 # ZIP: Check all variations
-                                zip_code = (rec.get("OriginalZip") or
-                                           rec.get("ZipCode") or
-                                           rec.get("ZIP") or
-                                           rec.get("Zip") or
-                                           "")
+                                record_zip_code = (rec.get("OriginalZip") or
+                                                  rec.get("ZipCode") or
+                                                  rec.get("ZIP") or
+                                                  rec.get("Zip") or
+                                                  "")
                                 
                                 # Work Description: Check all variations (Orlando uses ProjectName)
                                 work_desc = (rec.get("ProjectName") or      # Orlando
@@ -1123,9 +1125,9 @@ def search_stream(
                                 record_data = {
                                     "record_id": rec_id,
                                     "permit_number": rec.get("PermitNumber") or rec.get("PermitNum") or rec.get("Permit_Number") or rec_id,
-                                    "address": address,
-                                    "city": city,
-                                    "zip": zip_code,
+                                    "address": record_address,
+                                    "city": record_city,
+                                    "zip": record_zip_code,
                                     "work_description": work_desc,
                                     "status": status,
                                     "applied_date": applied_date,
@@ -1609,28 +1611,29 @@ def search(
                 
                 # Comprehensive field mapping (same as streaming endpoint)
                 # Address: Check all possible address columns
-                address = (rec.get("PermitAddress") or  # Orlando
-                          rec.get("SearchAddress") or   # Tampa/Miami/Orlando
-                          rec.get("OriginalAddress1") or # Tampa
-                          rec.get("AddressDescription") or # Tampa
-                          rec.get("Address") or         # Miami
-                          rec.get("OriginalAddress") or
-                          rec.get("StreetAddress") or
-                          rec.get("PropertyAddress") or
-                          "Address not available")
+                # IMPORTANT: Use different variable names to avoid conflicts with function parameters
+                record_address = (rec.get("PermitAddress") or  # Orlando
+                                 rec.get("SearchAddress") or   # Tampa/Miami/Orlando
+                                 rec.get("OriginalAddress1") or # Tampa
+                                 rec.get("AddressDescription") or # Tampa
+                                 rec.get("Address") or         # Miami
+                                 rec.get("OriginalAddress") or
+                                 rec.get("StreetAddress") or
+                                 rec.get("PropertyAddress") or
+                                 "Address not available")
                 
                 # City: Check all variations
-                city = (rec.get("OriginalCity") or
-                       rec.get("City") or
-                       rec.get("PropertyCity") or
-                       "")
+                record_city = (rec.get("OriginalCity") or
+                              rec.get("City") or
+                              rec.get("PropertyCity") or
+                              "")
                 
                 # ZIP: Check all variations
-                zip_code = (rec.get("OriginalZip") or
-                           rec.get("ZipCode") or
-                           rec.get("ZIP") or
-                           rec.get("Zip") or
-                           "")
+                record_zip_code = (rec.get("OriginalZip") or
+                                  rec.get("ZipCode") or
+                                  rec.get("ZIP") or
+                                  rec.get("Zip") or
+                                  "")
                 
                 # Work Description: Check all variations
                 work_desc = (rec.get("ProjectName") or      # Orlando
@@ -1660,9 +1663,9 @@ def search(
                 # Add basic display fields without generating PDF
                 rec["record_id"] = rec_id
                 rec["permit_number"] = rec.get("PermitNumber") or rec.get("PermitNum") or rec.get("Permit_Number") or rec_id
-                rec["address"] = address
-                rec["city"] = city
-                rec["zip"] = zip_code
+                rec["address"] = record_address
+                rec["city"] = record_city
+                rec["zip"] = record_zip_code
                 rec["work_description"] = work_desc
                 rec["status"] = status
                 rec["applied_date"] = applied_date
