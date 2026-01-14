@@ -916,19 +916,26 @@ def search_stream(
     def generate():
         try:
             # Create local variables from function parameters
+            # IMPORTANT: Must create local copies to avoid UnboundLocalError in nested function
+            local_address = address
+            local_city = city
             local_street_number_q = street_number_q
             local_street_name_q = street_name_q
             local_street_type_q = street_type_q
             local_street_dir_q = street_dir_q
             local_zip_q = zip_q
+            local_permit = permit
+            local_date_from = date_from
+            local_date_to = date_to
+            local_max_results = max_results
             
-            input_addr = (address or "").strip()
+            input_addr = (local_address or "").strip()
             if not input_addr:
                 yield f"data: {json.dumps({'error': 'address parameter required'})}\n\n"
                 return
 
             with get_db_connection() as conn:
-                tables = get_table_name(city=city, address=input_addr)
+                tables = get_table_name(city=local_city, address=input_addr)
                 cursor = conn.cursor()
                 all_results = []
                 result_count = 0
@@ -1025,30 +1032,30 @@ def search_stream(
                             if zip_conditions:
                                 where_parts.append(f"({' OR '.join(zip_conditions)})")
 
-                        if permit:
+                        if local_permit:
                             permit_cols = ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
                             for col in permit_cols:
                                 if col in columns:
                                     where_parts.append(f"AND {col} = ?")
-                                    params.append(permit.strip())
+                                    params.append(local_permit.strip())
                                     break
 
-                        if date_from:
+                        if local_date_from:
                             for col in ["AppliedDate", "ApplicationDate", "DateApplied", "Date"]:
                                 if col in columns:
                                     where_parts.append(f"AND {col} >= ?")
-                                    params.append(date_from)
+                                    params.append(local_date_from)
                                     break
 
-                        if date_to:
+                        if local_date_to:
                             for col in ["AppliedDate", "ApplicationDate", "DateApplied", "Date"]:
                                 if col in columns:
                                     where_parts.append(f"AND {col} <= ?")
-                                    params.append(date_to)
+                                    params.append(local_date_to)
                                     break
 
                         if where_parts:
-                            query = f"SELECT TOP {max_results} * FROM {table} WHERE {' AND '.join(where_parts)}"
+                            query = f"SELECT TOP {local_max_results} * FROM {table} WHERE {' AND '.join(where_parts)}"
                             if "SearchAddress" in address_cols:
                                 query += " OPTION (RECOMPILE, FORCE ORDER)"
 
