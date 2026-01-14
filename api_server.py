@@ -1061,18 +1061,72 @@ def search_stream(
                                 rec_id = pick_id_from_record(rec)
                                 
                                 # Prepare record for display
-                                # Handle Orlando-specific columns: PermitAddress, ProjectName, Status, IssuePermitDate
+                                # Comprehensive field mapping that checks ALL possible column name variations
+                                # This ensures we get complete data from Tampa, Miami, and Orlando tables
+                                
+                                # Address: Check all possible address columns (table-specific)
+                                address = (rec.get("PermitAddress") or  # Orlando
+                                          rec.get("SearchAddress") or   # Tampa/Miami/Orlando
+                                          rec.get("OriginalAddress1") or # Tampa
+                                          rec.get("AddressDescription") or # Tampa
+                                          rec.get("Address") or         # Miami
+                                          rec.get("OriginalAddress") or
+                                          rec.get("StreetAddress") or
+                                          rec.get("PropertyAddress") or
+                                          "Address not available")
+                                
+                                # City: Check all variations
+                                city = (rec.get("OriginalCity") or
+                                       rec.get("City") or
+                                       rec.get("PropertyCity") or
+                                       "")
+                                
+                                # ZIP: Check all variations
+                                zip_code = (rec.get("OriginalZip") or
+                                           rec.get("ZipCode") or
+                                           rec.get("ZIP") or
+                                           rec.get("Zip") or
+                                           "")
+                                
+                                # Work Description: Check all variations (Orlando uses ProjectName)
+                                work_desc = (rec.get("ProjectName") or      # Orlando
+                                           rec.get("WorkDescription") or    # Tampa
+                                           rec.get("ProjectDescription") or  # Tampa/Miami
+                                           rec.get("Description") or        # Generic
+                                           rec.get("WorkDesc") or
+                                           rec.get("Work_Description") or
+                                           "")
+                                
+                                # Status: Check all variations (Orlando uses Status, Tampa uses StatusCurrentMapped)
+                                status = (rec.get("Status") or              # Orlando
+                                         rec.get("StatusCurrentMapped") or  # Tampa
+                                         rec.get("CurrentStatus") or        # Miami
+                                         rec.get("ApplicationStatus") or    # Orlando alternative
+                                         rec.get("StatusCurrent") or
+                                         "")
+                                
+                                # Applied Date: Check all variations (Orlando uses IssuePermitDate)
+                                applied_date = (rec.get("IssuePermitDate") or    # Orlando
+                                               rec.get("AppliedDate") or         # Tampa
+                                               rec.get("ApplicationDate") or     # Miami
+                                               rec.get("DateApplied") or
+                                               rec.get("Date") or
+                                               "")
+                                
                                 record_data = {
                                     "record_id": rec_id,
-                                    "permit_number": rec.get("PermitNumber") or rec.get("PermitNum") or rec_id,
-                                    "address": rec.get("PermitAddress") or rec.get("SearchAddress") or rec.get("OriginalAddress1") or rec.get("AddressDescription") or rec.get("Address") or "Address not available",
-                                    "city": rec.get("OriginalCity") or rec.get("City") or "",
-                                    "zip": rec.get("OriginalZip") or rec.get("ZipCode") or "",
-                                    "work_description": rec.get("ProjectName") or rec.get("WorkDescription") or rec.get("ProjectDescription") or rec.get("Description") or "",
-                                    "status": rec.get("Status") or rec.get("StatusCurrentMapped") or rec.get("CurrentStatus") or "",
-                                    "applied_date": rec.get("IssuePermitDate") or rec.get("AppliedDate") or rec.get("ApplicationDate") or "",
+                                    "permit_number": rec.get("PermitNumber") or rec.get("PermitNum") or rec.get("Permit_Number") or rec_id,
+                                    "address": address,
+                                    "city": city,
+                                    "zip": zip_code,
+                                    "work_description": work_desc,
+                                    "status": status,
+                                    "applied_date": applied_date,
                                     "table": table
                                 }
+                                
+                                # Also include the full record for PDF generation
+                                record_data["_full_record"] = rec
                                 
                                 result_count += 1
                                 all_results.append(rec)
@@ -1214,16 +1268,31 @@ def search(
                     columns = [column[0] for column in cursor.description]
 
                     # Find address-related columns
-                    # IMPORTANT: Include table-specific columns:
-                    # - Tampa/Miami: SearchAddress, OriginalAddress1, AddressDescription, Address
-                    # - Orlando: PermitAddress (primary address field)
+                    # IMPORTANT: Check ALL possible address column names for each table
+                    # Different tables use different column names:
+                    # - Tampa: SearchAddress, OriginalAddress1, AddressDescription
+                    # - Miami: Address (primary), SearchAddress (if exists)
+                    # - Orlando: PermitAddress (primary), SearchAddress (if exists)
                     address_cols = []
-                    for col in ["SearchAddress", "PermitAddress", "OriginalAddress1", "AddressDescription", "Address", "OriginalAddress", "StreetAddress", "PropertyAddress"]:
+                    possible_address_cols = [
+                        "PermitAddress",      # Orlando primary
+                        "SearchAddress",      # Tampa/Miami/Orlando (if exists)
+                        "Address",            # Miami primary
+                        "OriginalAddress1",   # Tampa primary
+                        "AddressDescription", # Tampa secondary
+                        "OriginalAddress",    # Generic
+                        "StreetAddress",      # Generic
+                        "PropertyAddress"     # Generic
+                    ]
+                    for col in possible_address_cols:
                         if col in columns:
                             address_cols.append(col)
-
-                    if not address_cols:
-                        logging.warning("No address columns found in table %s", table)
+                    
+                    # Log which address columns were found for debugging
+                    if address_cols:
+                        logging.info("Table %s has address columns: %s", table, address_cols)
+                    else:
+                        logging.warning("No address columns found in table %s. Available columns: %s", table, columns[:10])
                         continue
 
                     # STRICT SEARCH CONDITIONS - STEP BY STEP FILTERING
@@ -1504,8 +1573,18 @@ def search(
 
                     # Log sample matches for debugging
                     if table_results:
-                        sample_addr = table_results[0].get("SearchAddress") or table_results[0].get("OriginalAddress1") or "N/A"
-                        sample_zip = table_results[0].get("OriginalZip") or table_results[0].get("ZipCode") or "N/A"
+                        # Check all possible address columns for sample
+                        sample_addr = (table_results[0].get("PermitAddress") or
+                                      table_results[0].get("SearchAddress") or
+                                      table_results[0].get("Address") or
+                                      table_results[0].get("OriginalAddress1") or
+                                      table_results[0].get("AddressDescription") or
+                                      "N/A")
+                        sample_zip = (table_results[0].get("OriginalZip") or
+                                     table_results[0].get("ZipCode") or
+                                     table_results[0].get("ZIP") or
+                                     table_results[0].get("Zip") or
+                                     "N/A")
                         logging.info("Found %d results from table %s | Sample: address='%s', zip='%s'", 
                                     len(table_results), table, sample_addr[:50], sample_zip)
                     else:
@@ -1520,15 +1599,66 @@ def search(
             logging.info("Processing %d records from all_results", len(all_results))
             for rec in all_results[:max_results]:
                 rec_id = pick_id_from_record(rec)
+                
+                # Comprehensive field mapping (same as streaming endpoint)
+                # Address: Check all possible address columns
+                address = (rec.get("PermitAddress") or  # Orlando
+                          rec.get("SearchAddress") or   # Tampa/Miami/Orlando
+                          rec.get("OriginalAddress1") or # Tampa
+                          rec.get("AddressDescription") or # Tampa
+                          rec.get("Address") or         # Miami
+                          rec.get("OriginalAddress") or
+                          rec.get("StreetAddress") or
+                          rec.get("PropertyAddress") or
+                          "Address not available")
+                
+                # City: Check all variations
+                city = (rec.get("OriginalCity") or
+                       rec.get("City") or
+                       rec.get("PropertyCity") or
+                       "")
+                
+                # ZIP: Check all variations
+                zip_code = (rec.get("OriginalZip") or
+                           rec.get("ZipCode") or
+                           rec.get("ZIP") or
+                           rec.get("Zip") or
+                           "")
+                
+                # Work Description: Check all variations
+                work_desc = (rec.get("ProjectName") or      # Orlando
+                            rec.get("WorkDescription") or    # Tampa
+                            rec.get("ProjectDescription") or # Tampa/Miami
+                            rec.get("Description") or        # Generic
+                            rec.get("WorkDesc") or
+                            rec.get("Work_Description") or
+                            "")
+                
+                # Status: Check all variations
+                status = (rec.get("Status") or              # Orlando
+                         rec.get("StatusCurrentMapped") or  # Tampa
+                         rec.get("CurrentStatus") or        # Miami
+                         rec.get("ApplicationStatus") or    # Orlando alternative
+                         rec.get("StatusCurrent") or
+                         "")
+                
+                # Applied Date: Check all variations
+                applied_date = (rec.get("IssuePermitDate") or    # Orlando
+                               rec.get("AppliedDate") or         # Tampa
+                               rec.get("ApplicationDate") or     # Miami
+                               rec.get("DateApplied") or
+                               rec.get("Date") or
+                               "")
+                
                 # Add basic display fields without generating PDF
                 rec["record_id"] = rec_id
-                rec["permit_number"] = rec.get("PermitNumber") or rec.get("PermitNum") or rec_id
-                rec["address"] = rec.get("SearchAddress") or rec.get("OriginalAddress1") or rec.get("AddressDescription") or "Address not available"
-                rec["city"] = rec.get("OriginalCity") or rec.get("City") or ""
-                rec["zip"] = rec.get("OriginalZip") or rec.get("ZipCode") or ""
-                rec["work_description"] = rec.get("WorkDescription") or rec.get("ProjectDescription") or rec.get("Description") or ""
-                rec["status"] = rec.get("StatusCurrentMapped") or rec.get("CurrentStatus") or ""
-                rec["applied_date"] = rec.get("AppliedDate") or rec.get("ApplicationDate") or ""
+                rec["permit_number"] = rec.get("PermitNumber") or rec.get("PermitNum") or rec.get("Permit_Number") or rec_id
+                rec["address"] = address
+                rec["city"] = city
+                rec["zip"] = zip_code
+                rec["work_description"] = work_desc
+                rec["status"] = status
+                rec["applied_date"] = applied_date
                 results.append(rec)
             
             dur_ms = int((time.perf_counter() - start_t) * 1000)
