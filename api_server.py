@@ -1508,6 +1508,18 @@ async def generate_pdf_for_record(request: Request):
 
             # Store source table in record for PDF generation context
             record["_source_table"] = source_table
+            
+            # Log record details before PDF generation
+            logging.info("✅ Found record in table %s using PERMIT column PermitNumber with value %s", source_table, permit_id)
+            logging.info("Record has %d columns. Sample fields: %s", len(record.keys()), list(record.keys())[:10])
+            
+            # Log key Orlando fields
+            key_fields = ["PermitAddress", "Status", "StatusDesc", "PermitType", "PermitClass", 
+                         "Parcel", "ProjectName", "IssuePermitDate"]
+            for field in key_fields:
+                if field in record:
+                    val = str(record[field])[:150] if record[field] else "EMPTY"
+                    logging.info("  [%s] = %s", field, val)
 
             # Generate PDF
             pdf_start = time.perf_counter()
@@ -1693,36 +1705,43 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
                                "Address", "StreetAddress", "PropertyAddress", "SearchAddress")
         addr2 = get_field_value(record, "OriginalAddress2", "Address2")
         property_address = (addr1 + " " + addr2).strip() if addr2 else addr1
+        
+        logging.info("Address parsing: addr1='%s', addr2='%s', property_address='%s'", 
+                    addr1[:100] if addr1 else "EMPTY", addr2[:50] if addr2 else "EMPTY", 
+                    property_address[:100] if property_address else "EMPTY")
 
         # Address description - try multiple variations
         address_description = get_field_value(record, "AddressDescription", "PermitAddress", 
                                              "SearchAddress", "OriginalAddress1", "Address")
 
+        # Parse address components once if address exists
+        parsed_city = ""
+        parsed_state = ""
+        parsed_zip = ""
+        if addr1:
+            parsed_city, parsed_state, parsed_zip = parse_address_components(addr1)
+            logging.info("Parsed from address '%s': city='%s', state='%s', zip='%s'", 
+                        addr1[:100], parsed_city or "EMPTY", parsed_state or "EMPTY", parsed_zip or "EMPTY")
+
         # City - try multiple variations, then parse from address if not found
         city = get_field_value(record, "OriginalCity", "City", "PropertyCity", "PermitCity")
-        if not city and addr1:
-            # Parse city from address string (e.g., "1708 LAKESIDE DR ORLANDO FL 32803")
-            parsed_city, _, _ = parse_address_components(addr1)
-            if parsed_city:
-                city = parsed_city.title()  # Capitalize properly (e.g., "Orlando")
+        if not city and parsed_city:
+            city = parsed_city.title()  # Capitalize properly (e.g., "Orlando")
         if not city:
             city = "N/A"
+        logging.info("Final city: '%s'", city)
 
         # State - try multiple variations, then parse from address if not found
         state = get_field_value(record, "OriginalState", "State", "PropertyState", "PermitState")
-        if not state and addr1:
-            # Parse state from address string (e.g., "1708 LAKESIDE DR ORLANDO FL 32803")
-            _, parsed_state, _ = parse_address_components(addr1)
-            if parsed_state:
-                state = parsed_state
+        if not state and parsed_state:
+            state = parsed_state
+        logging.info("Final state: '%s'", state or "EMPTY")
 
         # Zip code - try multiple variations, then parse from address if not found
         zip_code = get_field_value(record, "OriginalZip", "ZipCode", "ZIP", "Zip", "PostalCode")
-        if not zip_code and addr1:
-            # Parse zip from address string
-            _, _, parsed_zip = parse_address_components(addr1)
-            if parsed_zip:
-                zip_code = parsed_zip
+        if not zip_code and parsed_zip:
+            zip_code = parsed_zip
+        logging.info("Final zip: '%s'", zip_code or "EMPTY")
 
         # Permit class - try multiple variations
         permit_class = get_field_value(record, "PermitClass", "Class", "ApplicationType", "WorkType")
@@ -1735,14 +1754,23 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
         # Orlando: IssuePermitDate → Application Date
         applied_date = get_field_value(record, "IssuePermitDate", "AppliedDate", "ApplicationDate", 
                                      "DateApplied", "ApplicationDateApplied", "Date", "IssueDate")
+        logging.info("Applied date: '%s' (tried IssuePermitDate, AppliedDate, etc.)", applied_date or "EMPTY")
+        
         completion_date = get_field_value(record, "CompletedDate", "CompletionDate", "DateCompleted",
                                         "FinalDate", "DateFinished", "CompleteDate")
+        logging.info("Completion date: '%s'", completion_date or "EMPTY")
+        
         expires_date = get_field_value(record, "ExpiresDate", "ExpirationDate", "ExpiryDate",
                                       "DateExpires", "Expiration", "ExpireDate")
+        logging.info("Expires date: '%s'", expires_date or "EMPTY")
+        
         last_updated = get_field_value(record, "LastUpdated", "LastUpdate", "DateLastUpdated",
                                       "UpdatedDate", "ModifiedDate", "UpdateDate")
+        logging.info("Last updated: '%s'", last_updated or "EMPTY")
+        
         status_date = get_field_value(record, "StatusDate", "StatusDateUpdated", "DateStatus",
                                      "CurrentStatusDate", "StatusUpdateDate")
+        logging.info("Status date: '%s'", status_date or "EMPTY")
 
         # Publisher - try multiple variations
         publisher = get_field_value(record, "Publisher", "Source", "DataSource", "Origin")
