@@ -283,57 +283,19 @@ def get_db_connection():
             except:
                 pass
 
-# Configuration: All permit tables (easy to add more in future)
-ALL_TABLES = [
-    "dbo.permits",           # Tampa
-    "dbo.miami_permits",     # Miami-Dade
-    "dbo.orlando_permits"    # Orlando/Orange County
-]
-
-def get_table_name(city: Optional[str] = None, address: Optional[str] = None) -> List[str]:
-    """
-    Smart table detection with multiple strategies:
-    1. If city explicitly provided -> return specific table
-    2. If address contains city/county name -> detect and route to specific table
-    3. Otherwise -> query ALL tables (most comprehensive, ensures no results missed)
+def get_table_name(city: Optional[str]) -> List[str]:
+    """Determine which table(s) to query based on city parameter"""
+    city_lower = (city or "").strip().lower()
     
-    This approach is scalable: just add new tables to ALL_TABLES list.
-    """
-    # Priority 1: Explicit city parameter (most reliable)
-    if city:
-        city_lower = city.strip().lower()
-        if "tampa" in city_lower:
-            logging.info("Table detection: Using Tampa table (from city parameter)")
-            return ["dbo.permits"]
-        elif "miami" in city_lower or "dade" in city_lower:
-            logging.info("Table detection: Using Miami table (from city parameter)")
-            return ["dbo.miami_permits"]
-        elif "orlando" in city_lower or "orange" in city_lower:
-            logging.info("Table detection: Using Orlando table (from city parameter)")
-            return ["dbo.orlando_permits"]
-    
-    # Priority 2: Detect from address if no city provided (smart detection)
-    if address:
-        addr_lower = address.lower()
-        
-        # Check for Miami-Dade indicators
-        if "miami" in addr_lower or "dade" in addr_lower or "miami-dade" in addr_lower:
-            logging.info("Table detection: Using Miami table (detected from address: %s)", address[:50])
-            return ["dbo.miami_permits"]
-        
-        # Check for Orlando/Orange County indicators
-        if "orlando" in addr_lower or "orange" in addr_lower or "orange county" in addr_lower:
-            logging.info("Table detection: Using Orlando table (detected from address: %s)", address[:50])
-            return ["dbo.orlando_permits"]
-        
-        # Check for Tampa indicators
-        if "tampa" in addr_lower or "hillsborough" in addr_lower:
-            logging.info("Table detection: Using Tampa table (detected from address: %s)", address[:50])
-            return ["dbo.permits"]
-    
-    # Priority 3: Default - query ALL tables (most comprehensive, ensures no results missed)
-    logging.info("Table detection: Using ALL tables (no city specified, no city detected in address)")
-    return ALL_TABLES.copy()
+    if "tampa" in city_lower:
+        return ["dbo.permits"]
+    elif "miami" in city_lower:
+        return ["dbo.miami_permits"]
+    elif "orlando" in city_lower:
+        return ["dbo.orlando_permits"]
+    else:
+        # If no city specified, search all tables
+        return ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
 
 # ----------------- Helpers -----------------
 def _read_csv_bytes_from_blob(container_client, blob_name: str) -> Optional[pd.DataFrame]:
@@ -439,35 +401,16 @@ def normalize_dir(token: str) -> str:
     t = (token or "").lower().strip(". ")
     return DIR_MAP.get(t, t)
 
-def normalize_ordinals(text: str) -> str:
-    """
-    Normalize ordinal suffixes in addresses (e.g., "131st" → "131", "2nd" → "2").
-    This handles Miami address format mismatch where Google returns "131st Ave" 
-    but database stores "131 AVE".
-    """
-    if not text:
-        return text
-    # Pattern to match ordinals: 1st, 2nd, 3rd, 4th, ..., 131st, etc.
-    # Matches: number + (st|nd|rd|th) followed by space or end of word
-    ordinal_pattern = re.compile(r'(\d+)(st|nd|rd|th)\b', re.IGNORECASE)
-    normalized = ordinal_pattern.sub(r'\1', text)  # Replace "131st" with "131"
-    return normalized
-
 def extract_address_components(input_address: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Heuristic extract of (street_number, route_text, zip_code) from a provided address string.
     Handles unit markers (A/B, Apt, Unit, #), trailing directional tokens (N, S, E, W, NE, etc.)
     and common punctuation.
-    Also normalizes ordinal suffixes (131st → 131) for Miami address matching.
     Returns (street_number or None, route_text or None, zip or None)
     """
     if not input_address:
         return None, None, None
     s = input_address.strip()
-    
-    # Normalize ordinals FIRST (before extracting components)
-    # This handles Miami: "7850 SW 131st Ave" → "7850 SW 131 Ave"
-    s = normalize_ordinals(s)
 
     # zip
     zip_match = ZIP_RE.search(s)
@@ -514,10 +457,9 @@ def extract_record_address_components(rec: dict) -> Tuple[Optional[str], Optiona
                 street_number = num_match.group(1).strip()
                 break
     
-    # Extract street name - try PermitAddress (Orlando) or OriginalAddress1 (Tampa) first
-    # (more reliable, AddressDescription might be a number)
+    # Extract street name - try OriginalAddress1 first (more reliable, AddressDescription might be a number)
     street_name = None
-    orig_addr = rec.get("PermitAddress") or rec.get("OriginalAddress1") or ""
+    orig_addr = rec.get("OriginalAddress1") or ""
     if orig_addr:
         # Format is usually: "3110 Chapin Ave W " or "3613 Lindell Ave  "
         cleaned = str(orig_addr).strip()
@@ -610,8 +552,7 @@ def record_address_values(rec: dict) -> List[str]:
             candidates.append(normalize_text(cleaned))
 
     # Common triplet composition attempts
-    # Include Orlando-specific PermitAddress
-    addr = rec.get("PermitAddress") or rec.get("Address") or rec.get("OriginalAddress") or rec.get("StreetAddress") or rec.get("PropertyAddress") or ""
+    addr = rec.get("Address") or rec.get("OriginalAddress") or rec.get("StreetAddress") or rec.get("PropertyAddress") or ""
     city = rec.get("OriginalCity") or rec.get("City") or rec.get("PropertyCity") or ""
     zipc = rec.get("OriginalZip") or rec.get("ZipCode") or rec.get("ZIP") or rec.get("Zip") or ""
     if addr or city or zipc:
@@ -706,7 +647,7 @@ def db_info():
         with get_db_connection() as conn:
             cursor = conn.cursor()
 
-            tables = ALL_TABLES
+            tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
             db_info = {"tables": {}, "indexes": {}}
 
             for table in tables:
@@ -761,7 +702,7 @@ def db_health():
             health_info = {"database_connected": True, "tables": {}, "indexes": {}}
 
             # Check tables
-            for table in ALL_TABLES:
+            for table in ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]:
                 try:
                     # Get row count
                     cursor.execute(f"SELECT COUNT(*) FROM {table}")
@@ -916,26 +857,19 @@ def search_stream(
     def generate():
         try:
             # Create local variables from function parameters
-            # IMPORTANT: Must create local copies to avoid UnboundLocalError in nested function
-            local_address = address
-            local_city = city
             local_street_number_q = street_number_q
             local_street_name_q = street_name_q
             local_street_type_q = street_type_q
             local_street_dir_q = street_dir_q
             local_zip_q = zip_q
-            local_permit = permit
-            local_date_from = date_from
-            local_date_to = date_to
-            local_max_results = max_results
             
-            input_addr = (local_address or "").strip()
+            input_addr = (address or "").strip()
             if not input_addr:
                 yield f"data: {json.dumps({'error': 'address parameter required'})}\n\n"
                 return
 
             with get_db_connection() as conn:
-                tables = get_table_name(city=local_city, address=input_addr)
+                tables = get_table_name(city)
                 cursor = conn.cursor()
                 all_results = []
                 result_count = 0
@@ -979,10 +913,7 @@ def search_stream(
                         cursor.execute(f"SELECT TOP 1 * FROM {table}")
                         columns = [column[0] for column in cursor.description]
                         address_cols = []
-                        # IMPORTANT: Include table-specific columns:
-                        # - Tampa/Miami: SearchAddress, OriginalAddress1, AddressDescription, Address
-                        # - Orlando: PermitAddress (primary address field)
-                        for col in ["SearchAddress", "PermitAddress", "OriginalAddress1", "AddressDescription", "Address", "OriginalAddress", "StreetAddress", "PropertyAddress"]:
+                        for col in ["SearchAddress", "OriginalAddress1", "AddressDescription", "Address", "OriginalAddress", "StreetAddress", "PropertyAddress"]:
                             if col in columns:
                                 address_cols.append(col)
 
@@ -1032,30 +963,30 @@ def search_stream(
                             if zip_conditions:
                                 where_parts.append(f"({' OR '.join(zip_conditions)})")
 
-                        if local_permit:
+                        if permit:
                             permit_cols = ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
                             for col in permit_cols:
                                 if col in columns:
                                     where_parts.append(f"AND {col} = ?")
-                                    params.append(local_permit.strip())
+                                    params.append(permit.strip())
                                     break
 
-                        if local_date_from:
+                        if date_from:
                             for col in ["AppliedDate", "ApplicationDate", "DateApplied", "Date"]:
                                 if col in columns:
                                     where_parts.append(f"AND {col} >= ?")
-                                    params.append(local_date_from)
+                                    params.append(date_from)
                                     break
 
-                        if local_date_to:
+                        if date_to:
                             for col in ["AppliedDate", "ApplicationDate", "DateApplied", "Date"]:
                                 if col in columns:
                                     where_parts.append(f"AND {col} <= ?")
-                                    params.append(local_date_to)
+                                    params.append(date_to)
                                     break
 
                         if where_parts:
-                            query = f"SELECT TOP {local_max_results} * FROM {table} WHERE {' AND '.join(where_parts)}"
+                            query = f"SELECT TOP {max_results} * FROM {table} WHERE {' AND '.join(where_parts)}"
                             if "SearchAddress" in address_cols:
                                 query += " OPTION (RECOMPILE, FORCE ORDER)"
 
@@ -1068,74 +999,17 @@ def search_stream(
                                 rec_id = pick_id_from_record(rec)
                                 
                                 # Prepare record for display
-                                # Comprehensive field mapping that checks ALL possible column name variations
-                                # This ensures we get complete data from Tampa, Miami, and Orlando tables
-                                
-                                # Address: Check all possible address columns (table-specific)
-                                # IMPORTANT: Use different variable name to avoid conflict with outer scope 'address' parameter
-                                record_address = (rec.get("PermitAddress") or  # Orlando
-                                                 rec.get("SearchAddress") or   # Tampa/Miami/Orlando
-                                                 rec.get("OriginalAddress1") or # Tampa
-                                                 rec.get("AddressDescription") or # Tampa
-                                                 rec.get("Address") or         # Miami
-                                                 rec.get("OriginalAddress") or
-                                                 rec.get("StreetAddress") or
-                                                 rec.get("PropertyAddress") or
-                                                 "Address not available")
-                                
-                                # City: Check all variations
-                                # IMPORTANT: Use different variable name to avoid conflict with outer scope 'city' parameter
-                                record_city = (rec.get("OriginalCity") or
-                                              rec.get("City") or
-                                              rec.get("PropertyCity") or
-                                              "")
-                                
-                                # ZIP: Check all variations
-                                record_zip_code = (rec.get("OriginalZip") or
-                                                  rec.get("ZipCode") or
-                                                  rec.get("ZIP") or
-                                                  rec.get("Zip") or
-                                                  "")
-                                
-                                # Work Description: Check all variations (Orlando uses ProjectName)
-                                work_desc = (rec.get("ProjectName") or      # Orlando
-                                           rec.get("WorkDescription") or    # Tampa
-                                           rec.get("ProjectDescription") or  # Tampa/Miami
-                                           rec.get("Description") or        # Generic
-                                           rec.get("WorkDesc") or
-                                           rec.get("Work_Description") or
-                                           "")
-                                
-                                # Status: Check all variations (Orlando uses Status, Tampa uses StatusCurrentMapped)
-                                status = (rec.get("Status") or              # Orlando
-                                         rec.get("StatusCurrentMapped") or  # Tampa
-                                         rec.get("CurrentStatus") or        # Miami
-                                         rec.get("ApplicationStatus") or    # Orlando alternative
-                                         rec.get("StatusCurrent") or
-                                         "")
-                                
-                                # Applied Date: Check all variations (Orlando uses IssuePermitDate)
-                                applied_date = (rec.get("IssuePermitDate") or    # Orlando
-                                               rec.get("AppliedDate") or         # Tampa
-                                               rec.get("ApplicationDate") or     # Miami
-                                               rec.get("DateApplied") or
-                                               rec.get("Date") or
-                                               "")
-                                
                                 record_data = {
                                     "record_id": rec_id,
-                                    "permit_number": rec.get("PermitNumber") or rec.get("PermitNum") or rec.get("Permit_Number") or rec_id,
-                                    "address": record_address,
-                                    "city": record_city,
-                                    "zip": record_zip_code,
-                                    "work_description": work_desc,
-                                    "status": status,
-                                    "applied_date": applied_date,
+                                    "permit_number": rec.get("PermitNumber") or rec.get("PermitNum") or rec_id,
+                                    "address": rec.get("SearchAddress") or rec.get("OriginalAddress1") or rec.get("AddressDescription") or "Address not available",
+                                    "city": rec.get("OriginalCity") or rec.get("City") or "",
+                                    "zip": rec.get("OriginalZip") or rec.get("ZipCode") or "",
+                                    "work_description": rec.get("WorkDescription") or rec.get("ProjectDescription") or rec.get("Description") or "",
+                                    "status": rec.get("StatusCurrentMapped") or rec.get("CurrentStatus") or "",
+                                    "applied_date": rec.get("AppliedDate") or rec.get("ApplicationDate") or "",
                                     "table": table
                                 }
-                                
-                                # Also include the full record for PDF generation
-                                record_data["_full_record"] = rec
                                 
                                 result_count += 1
                                 all_results.append(rec)
@@ -1196,8 +1070,8 @@ def search(
     # Get database connection from pool
     try:
         with get_db_connection() as conn:
-            # Determine which table(s) to query based on city and address (smart detection)
-            tables = get_table_name(city=city, address=input_addr)
+            # Determine which table(s) to query based on city
+            tables = get_table_name(city)
             logging.info("SEARCH start | address='%s' city='%s' permit='%s' dates=%s..%s max=%s tables=%s",
                          input_addr, city, permit, date_from, date_to, max_results, tables)
             
@@ -1277,31 +1151,13 @@ def search(
                     columns = [column[0] for column in cursor.description]
 
                     # Find address-related columns
-                    # IMPORTANT: Check ALL possible address column names for each table
-                    # Different tables use different column names:
-                    # - Tampa: SearchAddress, OriginalAddress1, AddressDescription
-                    # - Miami: Address (primary), SearchAddress (if exists)
-                    # - Orlando: PermitAddress (primary), SearchAddress (if exists)
                     address_cols = []
-                    possible_address_cols = [
-                        "PermitAddress",      # Orlando primary
-                        "SearchAddress",      # Tampa/Miami/Orlando (if exists)
-                        "Address",            # Miami primary
-                        "OriginalAddress1",   # Tampa primary
-                        "AddressDescription", # Tampa secondary
-                        "OriginalAddress",    # Generic
-                        "StreetAddress",      # Generic
-                        "PropertyAddress"     # Generic
-                    ]
-                    for col in possible_address_cols:
+                    for col in ["SearchAddress", "OriginalAddress1", "AddressDescription", "Address", "OriginalAddress", "StreetAddress", "PropertyAddress"]:
                         if col in columns:
                             address_cols.append(col)
-                    
-                    # Log which address columns were found for debugging
-                    if address_cols:
-                        logging.info("Table %s has address columns: %s", table, address_cols)
-                    else:
-                        logging.warning("No address columns found in table %s. Available columns: %s", table, columns[:10])
+
+                    if not address_cols:
+                        logging.warning("No address columns found in table %s", table)
                         continue
 
                     # STRICT SEARCH CONDITIONS - STEP BY STEP FILTERING
@@ -1314,43 +1170,35 @@ def search(
                                     street_number_q, street_name_q)
 
                         # Build patterns that require BOTH components together (not separate)
-                        # IMPORTANT: Normalize ordinals in patterns for Miami compatibility
-                        # e.g., "131st" → "131" to match database format "131 AVE"
-                        normalized_street_number = normalize_ordinals(street_number_q) if street_number_q else street_number_q
-                        normalized_street_name = normalize_ordinals(street_name_q) if street_name_q else street_name_q
-                        
                         address_patterns = []
 
                         # Primary pattern: "506 Lincoln" (both together)
-                        base_pattern = f"{normalized_street_number} {normalized_street_name}"
+                        base_pattern = f"{street_number_q} {street_name_q}"
                         address_patterns.append(base_pattern)
 
-                        # Normalize street type (uppercase for consistency with database)
-                        normalized_street_type = street_type_q.upper() if street_type_q else None
-                        
                         # With direction if provided: "506 N Lincoln"
                         if street_dir_q:
-                            dir_pattern = f"{normalized_street_number} {street_dir_q} {normalized_street_name}"
+                            dir_pattern = f"{street_number_q} {street_dir_q} {street_name_q}"
                             address_patterns.append(dir_pattern)
 
                         # With street type if provided: "506 Lincoln Ave"
-                        if normalized_street_type:
-                            type_pattern = f"{normalized_street_number} {normalized_street_name} {normalized_street_type}"
+                        if street_type_q:
+                            type_pattern = f"{street_number_q} {street_name_q} {street_type_q}"
                             address_patterns.append(type_pattern)
                             
                             # With both direction and type: "506 N Lincoln Ave"
                             if street_dir_q:
-                                full_pattern = f"{normalized_street_number} {street_dir_q} {normalized_street_name} {normalized_street_type}"
+                                full_pattern = f"{street_number_q} {street_dir_q} {street_name_q} {street_type_q}"
                                 address_patterns.append(full_pattern)
 
                         # Try common directions if no direction specified (but limit to avoid too many patterns)
                         if not street_dir_q:
                             # Only try N, S, E, W (not NE, NW, etc. to keep it focused)
                             for direction in ['N', 'S', 'E', 'W']:
-                                dir_pattern = f"{normalized_street_number} {direction} {normalized_street_name}"
+                                dir_pattern = f"{street_number_q} {direction} {street_name_q}"
                                 address_patterns.append(dir_pattern)
-                                if normalized_street_type:
-                                    dir_type_pattern = f"{normalized_street_number} {direction} {normalized_street_name} {normalized_street_type}"
+                                if street_type_q:
+                                    dir_type_pattern = f"{street_number_q} {direction} {street_name_q} {street_type_q}"
                                     address_patterns.append(dir_type_pattern)
 
                         # Limit patterns to avoid performance issues
@@ -1358,7 +1206,7 @@ def search(
 
                         # Create condition: ANY address column must contain ANY of these complete patterns
                         # OPTIMIZED: Use index-friendly patterns (no leading wildcard when possible)
-                        # Prefer SearchAddress/PermitAddress columns first (likely have indexes)
+                        # Prefer SearchAddress column first (likely has index)
                         pattern_conditions = []
                         for pattern in address_patterns:
                             # Try index-friendly pattern first: "506 Lincoln%" (uses index)
@@ -1366,14 +1214,10 @@ def search(
                             if "SearchAddress" in address_cols:
                                 pattern_conditions.append("SearchAddress LIKE ?")
                                 params.append(f"{pattern}%")  # No leading % - uses index!
-                            # If PermitAddress exists (Orlando), prioritize it too
-                            if "PermitAddress" in address_cols:
-                                pattern_conditions.append("PermitAddress LIKE ?")
-                                params.append(f"{pattern}%")  # No leading % - uses index!
                             
                             # For other columns, use both patterns for flexibility
                             for addr_col in address_cols:
-                                if addr_col not in ["SearchAddress", "PermitAddress"]:  # Already handled above
+                                if addr_col != "SearchAddress":  # Already handled above
                                     pattern_conditions.append(f"{addr_col} LIKE ?")
                                     params.append(f"{pattern}%")  # Index-friendly: no leading %
                                     # Also try with leading % for flexibility (but slower)
@@ -1390,80 +1234,63 @@ def search(
                     elif street_number_q:
                         # Only street number - OPTIMIZED: use index-friendly patterns
                         # e.g., "506" should not match "2506"
-                        # Normalize ordinals for Miami compatibility
-                        normalized_street_number = normalize_ordinals(street_number_q)
-                        logging.info("Searching for street_number='%s' (normalized: '%s') only (index-optimized)", 
-                                    street_number_q, normalized_street_number)
+                        logging.info("Searching for street_number='%s' only (index-optimized)", street_number_q)
                         pattern_conditions = []
                         
-                        # Prioritize SearchAddress/PermitAddress with index-friendly pattern
+                        # Prioritize SearchAddress with index-friendly pattern
                         if "SearchAddress" in address_cols:
                             pattern_conditions.append("SearchAddress LIKE ?")
-                            params.append(f"{normalized_street_number} %")  # At start - uses index!
-                        if "PermitAddress" in address_cols:
-                            pattern_conditions.append("PermitAddress LIKE ?")
-                            params.append(f"{normalized_street_number} %")  # At start - uses index!
+                            params.append(f"{street_number_q} %")  # At start - uses index!
                         
                         # Other columns with flexible matching
                         for addr_col in address_cols:
-                            if addr_col not in ["SearchAddress", "PermitAddress"]:
+                            if addr_col != "SearchAddress":
                                 pattern_conditions.append(f"{addr_col} LIKE ?")
-                                params.append(f"{normalized_street_number} %")  # Index-friendly
+                                params.append(f"{street_number_q} %")  # Index-friendly
                                 pattern_conditions.append(f"{addr_col} LIKE ?")
-                                params.append(f"% {normalized_street_number}%")  # Fallback
+                                params.append(f"% {street_number_q}%")  # Fallback
                         
                         if pattern_conditions:
                             where_parts.append(f"({' OR '.join(pattern_conditions)})")
 
                     elif street_name_q:
                         # Only street name - OPTIMIZED: use index-friendly patterns
-                        # Normalize ordinals for Miami compatibility
-                        normalized_street_name = normalize_ordinals(street_name_q)
-                        logging.info("Searching for street_name='%s' (normalized: '%s') only (index-optimized)", 
-                                    street_name_q, normalized_street_name)
+                        logging.info("Searching for street_name='%s' only (index-optimized)", street_name_q)
                         pattern_conditions = []
                         
-                        # Prioritize SearchAddress/PermitAddress with index-friendly pattern
+                        # Prioritize SearchAddress with index-friendly pattern
                         if "SearchAddress" in address_cols:
                             pattern_conditions.append("SearchAddress LIKE ?")
-                            params.append(f"{normalized_street_name}%")  # No leading % - uses index!
-                        if "PermitAddress" in address_cols:
-                            pattern_conditions.append("PermitAddress LIKE ?")
-                            params.append(f"{normalized_street_name}%")  # No leading % - uses index!
+                            params.append(f"{street_name_q}%")  # No leading % - uses index!
                         
                         # Other columns
                         for addr_col in address_cols:
-                            if addr_col not in ["SearchAddress", "PermitAddress"]:
+                            if addr_col != "SearchAddress":
                                 pattern_conditions.append(f"{addr_col} LIKE ?")
-                                params.append(f"{normalized_street_name}%")  # Index-friendly
+                                params.append(f"{street_name_q}%")  # Index-friendly
                                 pattern_conditions.append(f"{addr_col} LIKE ?")
-                                params.append(f"%{normalized_street_name}%")  # Fallback
+                                params.append(f"%{street_name_q}%")  # Fallback
                         
                         if pattern_conditions:
                             where_parts.append(f"({' OR '.join(pattern_conditions)})")
 
                     else:
                         # No components - fallback to full address (optimized)
-                        # Normalize ordinals for Miami compatibility
-                        normalized_input = normalize_ordinals(input_addr)
-                        logging.info("No address components - using optimized full address search (normalized ordinals)")
-                        normalized_addr = normalize_text(normalized_input)
+                        logging.info("No address components - using optimized full address search")
+                        normalized_addr = normalize_text(input_addr)
                         pattern_conditions = []
                         
                         # Try to extract first word for index-friendly search
                         first_word = normalized_addr.split()[0] if normalized_addr else ""
                         
-                        # Prioritize SearchAddress/PermitAddress with index-friendly pattern
+                        # Prioritize SearchAddress with index-friendly pattern
                         if "SearchAddress" in address_cols and first_word:
                             pattern_conditions.append("SearchAddress LIKE ?")
-                            params.append(f"{first_word}%")  # Index-friendly
-                        if "PermitAddress" in address_cols and first_word:
-                            pattern_conditions.append("PermitAddress LIKE ?")
                             params.append(f"{first_word}%")  # Index-friendly
                         
                         # Full normalized address for other columns
                         for addr_col in address_cols:
-                            if addr_col not in ["SearchAddress", "PermitAddress"]:
+                            if addr_col != "SearchAddress":
                                 if first_word:
                                     pattern_conditions.append(f"{addr_col} LIKE ?")
                                     params.append(f"{first_word}%")  # Index-friendly
@@ -1495,17 +1322,14 @@ def search(
                         # Second priority: ZIP must appear in address fields (but still strict)
                         # Use word boundary to avoid partial matches like "33609" matching "336091"
                         # Also search in address fields for zip (optimized)
-                        # Prioritize SearchAddress/PermitAddress with index-friendly pattern
+                        # Prioritize SearchAddress with index-friendly pattern
                         if "SearchAddress" in address_cols:
                             zip_conditions.append("SearchAddress LIKE ?")
-                            params.append(f"%{zip_q}")  # ZIP at end - index-friendly
-                        if "PermitAddress" in address_cols:
-                            zip_conditions.append("PermitAddress LIKE ?")
                             params.append(f"%{zip_q}")  # ZIP at end - index-friendly
                         
                         # Other columns
                         for addr_col in address_cols:
-                            if addr_col not in ["SearchAddress", "PermitAddress"]:
+                            if addr_col != "SearchAddress":
                                 zip_conditions.append(f"{addr_col} LIKE ?")
                                 params.append(f"% {zip_q}%")  # ZIP with space before
                                 zip_conditions.append(f"{addr_col} LIKE ?")
@@ -1582,18 +1406,8 @@ def search(
 
                     # Log sample matches for debugging
                     if table_results:
-                        # Check all possible address columns for sample
-                        sample_addr = (table_results[0].get("PermitAddress") or
-                                      table_results[0].get("SearchAddress") or
-                                      table_results[0].get("Address") or
-                                      table_results[0].get("OriginalAddress1") or
-                                      table_results[0].get("AddressDescription") or
-                                      "N/A")
-                        sample_zip = (table_results[0].get("OriginalZip") or
-                                     table_results[0].get("ZipCode") or
-                                     table_results[0].get("ZIP") or
-                                     table_results[0].get("Zip") or
-                                     "N/A")
+                        sample_addr = table_results[0].get("SearchAddress") or table_results[0].get("OriginalAddress1") or "N/A"
+                        sample_zip = table_results[0].get("OriginalZip") or table_results[0].get("ZipCode") or "N/A"
                         logging.info("Found %d results from table %s | Sample: address='%s', zip='%s'", 
                                     len(table_results), table, sample_addr[:50], sample_zip)
                     else:
@@ -1608,67 +1422,15 @@ def search(
             logging.info("Processing %d records from all_results", len(all_results))
             for rec in all_results[:max_results]:
                 rec_id = pick_id_from_record(rec)
-                
-                # Comprehensive field mapping (same as streaming endpoint)
-                # Address: Check all possible address columns
-                # IMPORTANT: Use different variable names to avoid conflicts with function parameters
-                record_address = (rec.get("PermitAddress") or  # Orlando
-                                 rec.get("SearchAddress") or   # Tampa/Miami/Orlando
-                                 rec.get("OriginalAddress1") or # Tampa
-                                 rec.get("AddressDescription") or # Tampa
-                                 rec.get("Address") or         # Miami
-                                 rec.get("OriginalAddress") or
-                                 rec.get("StreetAddress") or
-                                 rec.get("PropertyAddress") or
-                                 "Address not available")
-                
-                # City: Check all variations
-                record_city = (rec.get("OriginalCity") or
-                              rec.get("City") or
-                              rec.get("PropertyCity") or
-                              "")
-                
-                # ZIP: Check all variations
-                record_zip_code = (rec.get("OriginalZip") or
-                                  rec.get("ZipCode") or
-                                  rec.get("ZIP") or
-                                  rec.get("Zip") or
-                                  "")
-                
-                # Work Description: Check all variations
-                work_desc = (rec.get("ProjectName") or      # Orlando
-                            rec.get("WorkDescription") or    # Tampa
-                            rec.get("ProjectDescription") or # Tampa/Miami
-                            rec.get("Description") or        # Generic
-                            rec.get("WorkDesc") or
-                            rec.get("Work_Description") or
-                            "")
-                
-                # Status: Check all variations
-                status = (rec.get("Status") or              # Orlando
-                         rec.get("StatusCurrentMapped") or  # Tampa
-                         rec.get("CurrentStatus") or        # Miami
-                         rec.get("ApplicationStatus") or    # Orlando alternative
-                         rec.get("StatusCurrent") or
-                         "")
-                
-                # Applied Date: Check all variations
-                applied_date = (rec.get("IssuePermitDate") or    # Orlando
-                               rec.get("AppliedDate") or         # Tampa
-                               rec.get("ApplicationDate") or     # Miami
-                               rec.get("DateApplied") or
-                               rec.get("Date") or
-                               "")
-                
                 # Add basic display fields without generating PDF
                 rec["record_id"] = rec_id
-                rec["permit_number"] = rec.get("PermitNumber") or rec.get("PermitNum") or rec.get("Permit_Number") or rec_id
-                rec["address"] = record_address
-                rec["city"] = record_city
-                rec["zip"] = record_zip_code
-                rec["work_description"] = work_desc
-                rec["status"] = status
-                rec["applied_date"] = applied_date
+                rec["permit_number"] = rec.get("PermitNumber") or rec.get("PermitNum") or rec_id
+                rec["address"] = rec.get("SearchAddress") or rec.get("OriginalAddress1") or rec.get("AddressDescription") or "Address not available"
+                rec["city"] = rec.get("OriginalCity") or rec.get("City") or ""
+                rec["zip"] = rec.get("OriginalZip") or rec.get("ZipCode") or ""
+                rec["work_description"] = rec.get("WorkDescription") or rec.get("ProjectDescription") or rec.get("Description") or ""
+                rec["status"] = rec.get("StatusCurrentMapped") or rec.get("CurrentStatus") or ""
+                rec["applied_date"] = rec.get("AppliedDate") or rec.get("ApplicationDate") or ""
                 results.append(rec)
             
             dur_ms = int((time.perf_counter() - start_t) * 1000)
@@ -1701,21 +1463,16 @@ async def generate_pdf_for_record(request: Request):
     """
     try:
         record_data = await request.json()
-        # Prioritize permit_number over record_id (permit_number is more reliable)
-        permit_id = record_data.get("permit_number") or record_data.get("record_id")
+        permit_id = record_data.get("record_id") or record_data.get("permit_number")
         if not permit_id:
             raise HTTPException(status_code=400, detail="record_id or permit_number required")
-        
-        logging.info("PDF generation request: permit_number=%s, record_id=%s, using permit_id=%s", 
-                     record_data.get("permit_number"), record_data.get("record_id"), permit_id)
 
-        # Find record in database
+            # Find record in database
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            tables = ALL_TABLES
+            tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
             record = None
-
-            logging.info("Searching for record with permit_id=%s in tables: %s", permit_id, tables)
+            source_table = None
 
             for table in tables:
                 try:
@@ -1723,52 +1480,21 @@ async def generate_pdf_for_record(request: Request):
                     cursor.execute(f"SELECT TOP 1 * FROM {table}")
                     columns = [column[0] for column in cursor.description]
                     
-                    # PRIORITY 1: Try permit number columns first (most reliable for permit lookups)
-                    permit_cols = ["PermitNumber", "PermitNum", "Permit_Number", "Permit", "ApplicationNumber"]
-                    for col in permit_cols:
+                    # Try all ID candidate columns
+                    id_cols = ID_CANDIDATES + ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
+                    for col in id_cols:
                         if col in columns:
                             try:
                                 cursor.execute(f"SELECT TOP 1 * FROM {table} WHERE {col} = ?", (permit_id,))
                                 row = cursor.fetchone()
                                 if row:
                                     record = {c: (str(val) if val is not None else "") for c, val in zip(columns, row)}
+                                    source_table = table
                                     logging.info("✅ Found record in table %s using PERMIT column %s with value %s", table, col, permit_id)
-                                    # Log available fields for debugging (first 10 non-empty fields)
-                                    available_fields = [k for k, v in record.items() if v][:10]
-                                    logging.info("Record has %d columns. Sample fields: %s", len(columns), available_fields)
+                                    logging.info("Record has %d columns. Sample fields: %s", len(columns), list(columns)[:10])
                                     break
                             except Exception as e:
-                                logging.debug("Error querying permit column %s in table %s: %s", col, table, e)
-                                continue
-                    if record:
-                        break
-                    
-                    # PRIORITY 2: Try ID columns only if permit columns didn't work (fallback)
-                    # Only use ID columns if permit_id looks like a numeric ID
-                    id_cols = ["_id", "ID", "OBJECTID", "FID"]
-                    for col in id_cols:
-                        if col in columns:
-                            try:
-                                # Convert permit_id to appropriate type for ID columns
-                                search_value = permit_id
-                                # If it's a numeric ID column and permit_id is numeric, convert to int
-                                if col in ["ID", "_id", "OBJECTID", "FID"] and str(permit_id).isdigit():
-                                    try:
-                                        search_value = int(permit_id)
-                                    except (ValueError, TypeError):
-                                        search_value = permit_id
-                                
-                                cursor.execute(f"SELECT TOP 1 * FROM {table} WHERE {col} = ?", (search_value,))
-                                row = cursor.fetchone()
-                                if row:
-                                    record = {c: (str(val) if val is not None else "") for c, val in zip(columns, row)}
-                                    logging.info("✅ Found record in table %s using ID column %s with value %s", table, col, search_value)
-                                    # Log available fields for debugging (first 10 non-empty fields)
-                                    available_fields = [k for k, v in record.items() if v][:10]
-                                    logging.info("Record has %d columns. Sample fields: %s", len(columns), available_fields)
-                                    break
-                            except Exception as e:
-                                logging.debug("Error querying ID column %s in table %s: %s", col, table, e)
+                                logging.debug("Error querying column %s in table %s: %s", col, table, e)
                                 continue
                     if record:
                         break
@@ -1777,8 +1503,11 @@ async def generate_pdf_for_record(request: Request):
                     continue
 
             if not record:
-                logging.warning("❌ Record not found for permit_id=%s in any table. Searched permit columns first, then ID columns.", permit_id)
+                logging.warning("Record not found for permit_id=%s in any table", permit_id)
                 raise HTTPException(status_code=404, detail=f"Record not found for ID: {permit_id}")
+
+            # Store source table in record for PDF generation context
+            record["_source_table"] = source_table
 
             # Generate PDF
             pdf_start = time.perf_counter()
@@ -1862,92 +1591,117 @@ def get_record(permit_id: str = Query(...)):
     return JSONResponse({"record": record, "view_url": view_url, "download_url": download_url})
 
 # ----------------- PDF generation, view and download endpoints -----------------
+def get_field_value(record: dict, *field_names: str) -> str:
+    """Try multiple field name variations and return first non-empty value"""
+    for field_name in field_names:
+        value = record.get(field_name, "")
+        if value and str(value).strip():
+            return str(value).strip()
+    return ""
+
 def generate_pdf_from_template(record: dict, template_path: str) -> str:
     tmpdir = tempfile.gettempdir()
     permit_id = pick_id_from_record(record)
     pdf_file = tmp_pdf_path_for_id(permit_id)
     try:
         logging.info("Starting PDF generation for record %s", permit_id)
+        
+        # Log available columns for debugging (sample first 20)
+        available_cols = list(record.keys())[:20]
+        logging.info("Record has %d columns. Sample fields: %s", len(record.keys()), available_cols)
 
-        # Handle Orlando-specific address field: PermitAddress
-        # Priority: PermitAddress (Orlando) > OriginalAddress1 (Tampa) > Address (Miami)
-        addr1 = record.get("PermitAddress", "") or record.get("OriginalAddress1", "") or record.get("OriginalAddress", "") or record.get("Address", "")
-        addr2 = record.get("OriginalAddress2", "")
-        property_address = (addr1 + " " + addr2).strip()
+        # Address fields - try multiple variations including Orlando-specific
+        addr1 = get_field_value(record, "OriginalAddress1", "OriginalAddress", "PermitAddress", 
+                               "Address", "StreetAddress", "PropertyAddress", "SearchAddress")
+        addr2 = get_field_value(record, "OriginalAddress2", "Address2")
+        property_address = (addr1 + " " + addr2).strip() if addr2 else addr1
+
+        # Address description - try multiple variations
+        address_description = get_field_value(record, "AddressDescription", "PermitAddress", 
+                                             "SearchAddress", "OriginalAddress1", "Address")
+
+        # City - try multiple variations
+        city = get_field_value(record, "OriginalCity", "City", "PropertyCity", "PermitCity")
+        if not city:
+            city = "N/A"
+
+        # State - try multiple variations
+        state = get_field_value(record, "OriginalState", "State", "PropertyState", "PermitState")
+
+        # Zip code - try multiple variations
+        zip_code = get_field_value(record, "OriginalZip", "ZipCode", "ZIP", "Zip", "PostalCode")
+
+        # Permit class - try multiple variations
+        permit_class = get_field_value(record, "PermitClass", "Class", "ApplicationType", "WorkType")
+        
+        # Permit classification - try multiple variations
+        permit_classification = get_field_value(record, "PermitClassMapped", "PermitClassification", 
+                                               "Classification", "ApplicationType", "WorkType")
+
+        # Dates - try multiple variations
+        applied_date = get_field_value(record, "AppliedDate", "ApplicationDate", "DateApplied", 
+                                     "ApplicationDateApplied", "Date")
+        completion_date = get_field_value(record, "CompletedDate", "CompletionDate", "DateCompleted",
+                                        "FinalDate", "DateFinished")
+        expires_date = get_field_value(record, "ExpiresDate", "ExpirationDate", "ExpiryDate",
+                                      "DateExpires", "Expiration")
+        last_updated = get_field_value(record, "LastUpdated", "LastUpdate", "DateLastUpdated",
+                                      "UpdatedDate", "ModifiedDate")
+        status_date = get_field_value(record, "StatusDate", "StatusDateUpdated", "DateStatus",
+                                     "CurrentStatusDate")
+
+        # Publisher - try multiple variations
+        publisher = get_field_value(record, "Publisher", "Source", "DataSource", "Origin")
 
         # ensure 'other' exists so templates referencing other.* don't break
         ctx = {
             "dates": {
-                # Orlando: IssuePermitDate > AppliedDate > ApplicationDate
-                "application": (record.get("IssuePermitDate", "") or 
-                               record.get("AppliedDate", "") or 
-                               record.get("ApplicationDate", "")),
-                "completion": record.get("CompletedDate", ""),
-                "expires": record.get("ExpiresDate", ""),
-                "last_updated": record.get("LastUpdated", ""),
-                "status_date": record.get("StatusDate", "")
+                "application": applied_date,
+                "completion": completion_date,
+                "expires": expires_date,
+                "last_updated": last_updated,
+                "status_date": status_date
             },
             "permit": {
-                # Orlando: PermitClass (if exists)
-                "class": record.get("PermitClass", "") or record.get("PermitClassMapped", ""),
-                "classification": record.get("PermitClassMapped", ""),
-                "number": record.get("PermitNum", "") or record.get("PermitNumber", ""),
-                # Orlando: StatusDesc > WorkType > ApplicationType > PermitType
-                "type": (record.get("StatusDesc", "") or 
-                        record.get("WorkType", "") or 
-                        record.get("ApplicationType", "") or 
-                        record.get("PermitType", "")),
-                # Orlando: PermitType > PlanReviewType > PermitTypeMapped
-                "type_classification": (record.get("PermitType", "") or 
-                                       record.get("PlanReviewType", "") or 
-                                       record.get("PermitTypeMapped", "")),
+                "class": permit_class,
+                "classification": permit_classification,
+                "number": get_field_value(record, "PermitNum", "PermitNumber", "Permit_Number", "Permit"),
+                "type": get_field_value(record, "PermitType", "Type", "ApplicationType", "WorkType"),
+                "type_classification": get_field_value(record, "PermitTypeMapped", "TypeClassification", "Type"),
                 "id": permit_id,
-                "certificate_number": record.get("certificate_number", "") or record.get("CertificateNo", "") or ""
+                "certificate_number": get_field_value(record, "certificate_number", "CertificateNo", "CertificateNumber", "CertNumber")
             },
             "property": {
-                "address_description": record.get("AddressDescription", ""),
+                "address_description": address_description,
                 "address": property_address,
-                # Orlando: Check all city variations
-                "city": (record.get("OriginalCity", "") or 
-                        record.get("City", "") or 
-                        record.get("PropertyCity", "") or
-                        "N/A"),
-                "state": record.get("OriginalState") or record.get("State", ""),
-                # Orlando: Check all ZIP variations
-                "zip_code": (record.get("OriginalZip", "") or 
-                            record.get("ZipCode", "") or 
-                            record.get("ZIP", "") or 
-                            record.get("Zip", "")),
-                # Orlando: ParcelNumber > Parcel > PIN (based on actual table structure)
-                "pin": (record.get("ParcelNumber", "") or 
-                       record.get("Parcel", "") or 
-                       record.get("PIN", ""))
+                "city": city,
+                "state": state,
+                "zip_code": zip_code,
+                "pin": get_field_value(record, "PIN", "ParcelNumber", "ParcelID", "ParcelNum", "PropertyID")
             },
-            # Orlando: ApplicationStatus > Status > StatusCurrent
-            "status_current": (record.get("ApplicationStatus", "") or 
-                              record.get("Status", "") or 
-                              record.get("StatusCurrent", "")),
-            # Orlando: ApplicationStatus > Status > StatusCurrentMapped
-            "current_status": (record.get("ApplicationStatus", "") or 
-                              record.get("Status", "") or 
-                              record.get("StatusCurrentMapped", "")),
+            "status_current": get_field_value(record, "StatusCurrent", "CurrentStatus", "Status", "ApplicationStatus"),
+            "current_status": get_field_value(record, "StatusCurrentMapped", "CurrentStatusMapped", "StatusMapped", "ApplicationStatus"),
             "other": {
-                "online_record_url": record.get("Link", "") or "",
-                "publisher": record.get("Publisher", "") or ""
+                "online_record_url": get_field_value(record, "Link", "URL", "OnlineLink", "RecordURL"),
+                "publisher": publisher
             },
-            # Orlando: ProjectName > WorkType > WorkDescription (based on actual table structure)
-            "work_description": (record.get("ProjectName", "") or 
-                                record.get("WorkType", "") or
-                                record.get("WorkDescription", "") or 
-                                record.get("ProjectDescription", "") or 
-                                record.get("Description", "") or 
-                                record.get("WorkDesc", "") or 
-                                record.get("Work_Description", "") or ""),
+            "work_description": get_field_value(record, "WorkDescription", "ProjectDescription", "Description", 
+                                              "WorkDesc", "Work_Description", "WorkType", "ProjectDesc"),
             "logo_image_url": str((BASE_DIR / "Medias" / "badge.png").as_uri()) if (BASE_DIR / "Medias" / "badge.png").exists() else "",
             "map_image_url": str((BASE_DIR / "Medias" / "map.png").as_uri()) if (BASE_DIR / "Medias" / "map.png").exists() else "",
             "generated_on_date": datetime.now().strftime("%m/%d/%Y"),
             "record": record
         }
+        
+        # Log which fields were found for debugging
+        logging.info("PDF context fields: address_desc='%s', state='%s', zip='%s', permit_class='%s', "
+                    "permit_classification='%s', completion_date='%s', expires_date='%s', "
+                    "last_updated='%s', status_date='%s', publisher='%s'",
+                    address_description[:50] if address_description else "N/A",
+                    state or "N/A", zip_code or "N/A", permit_class or "N/A",
+                    permit_classification or "N/A", completion_date or "N/A",
+                    expires_date or "N/A", last_updated or "N/A", status_date or "N/A",
+                    publisher or "N/A")
 
         tmpl_name = Path(template_path).name
         template = templates.get_template(tmpl_name)
