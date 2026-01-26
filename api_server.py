@@ -1683,43 +1683,43 @@ async def generate_pdf_for_record(request: Request):
                 raise HTTPException(status_code=500, detail=f"API error: {str(e)}")
         else:
             # Fallback to SQL database search
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
-                record = None
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
+            record = None
                 source_table = None
 
-                for table in tables:
-                    try:
-                        # First, get column names to check what's available
-                        cursor.execute(f"SELECT TOP 1 * FROM {table}")
-                        columns = [column[0] for column in cursor.description]
-                        
-                        # Try all ID candidate columns
-                        id_cols = ID_CANDIDATES + ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
-                        for col in id_cols:
-                            if col in columns:
-                                try:
-                                    cursor.execute(f"SELECT TOP 1 * FROM {table} WHERE {col} = ?", (permit_id,))
-                                    row = cursor.fetchone()
-                                    if row:
-                                        record = {c: (str(val) if val is not None else "") for c, val in zip(columns, row)}
+            for table in tables:
+                try:
+                    # First, get column names to check what's available
+                    cursor.execute(f"SELECT TOP 1 * FROM {table}")
+                    columns = [column[0] for column in cursor.description]
+                    
+                    # Try all ID candidate columns
+                    id_cols = ID_CANDIDATES + ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
+                    for col in id_cols:
+                        if col in columns:
+                            try:
+                                cursor.execute(f"SELECT TOP 1 * FROM {table} WHERE {col} = ?", (permit_id,))
+                                row = cursor.fetchone()
+                                if row:
+                                    record = {c: (str(val) if val is not None else "") for c, val in zip(columns, row)}
                                         source_table = table
                                         logging.info("✅ Found record in table %s using PERMIT column %s with value %s", table, col, permit_id)
                                         logging.info("Record has %d columns. Sample fields: %s", len(columns), list(columns)[:10])
-                                        break
-                                except Exception as e:
-                                    logging.debug("Error querying column %s in table %s: %s", col, table, e)
-                                    continue
-                        if record:
-                            break
-                    except Exception as e:
-                        logging.debug("Error searching table %s: %s", table, e)
-                        continue
+                                    break
+                            except Exception as e:
+                                logging.debug("Error querying column %s in table %s: %s", col, table, e)
+                                continue
+                    if record:
+                        break
+                except Exception as e:
+                    logging.debug("Error searching table %s: %s", table, e)
+                    continue
 
-                if not record:
-                    logging.warning("Record not found for permit_id=%s in any table", permit_id)
-                    raise HTTPException(status_code=404, detail=f"Record not found for ID: {permit_id}")
+            if not record:
+                logging.warning("Record not found for permit_id=%s in any table", permit_id)
+                raise HTTPException(status_code=404, detail=f"Record not found for ID: {permit_id}")
 
                 # Store source table in record for PDF generation context
                 record["_source_table"] = source_table
@@ -1736,22 +1736,22 @@ async def generate_pdf_for_record(request: Request):
                 val = str(record[field])[:150] if record[field] else "EMPTY"
                 logging.info("  [%s] = %s", field, val)
 
-        # Generate PDF
-        pdf_start = time.perf_counter()
-        pdf_path = generate_pdf_from_template(record, str(TEMPLATES_DIR / "certificate-placeholder.html"))
-        pdf_time = time.perf_counter() - pdf_start
+            # Generate PDF
+            pdf_start = time.perf_counter()
+            pdf_path = generate_pdf_from_template(record, str(TEMPLATES_DIR / "certificate-placeholder.html"))
+            pdf_time = time.perf_counter() - pdf_start
 
-        rec_id = pick_id_from_record(record)
-        token = create_token_for_permit(rec_id)
-        
-        logging.info("PDF generated in %.2fms for record %s", pdf_time * 1000, rec_id)
+            rec_id = pick_id_from_record(record)
+            token = create_token_for_permit(rec_id)
+            
+            logging.info("PDF generated in %.2fms for record %s", pdf_time * 1000, rec_id)
 
-        return JSONResponse({
-            "success": True,
-            "view_url": f"/view/{token}",
-            "download_url": f"/download/{token}.pdf",
-            "generation_time_ms": int(pdf_time * 1000)
-        })
+            return JSONResponse({
+                "success": True,
+                "view_url": f"/view/{token}",
+                "download_url": f"/download/{token}.pdf",
+                "generation_time_ms": int(pdf_time * 1000)
+            })
 
     except Exception as e:
         logging.exception("PDF generation error: %s", e)
@@ -2053,7 +2053,7 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
     pdf_file = tmp_pdf_path_for_id(permit_id)
     try:
         logging.info("Starting PDF generation for record %s", permit_id)
-        
+
         # Log ALL available columns for debugging
         all_cols = list(record.keys())
         logging.info("Record has %d columns. All columns: %s", len(all_cols), all_cols)

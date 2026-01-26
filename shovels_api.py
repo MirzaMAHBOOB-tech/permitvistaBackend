@@ -181,5 +181,3 @@ def get_permits_for_address(address: str, permit_from: Optional[str] = None,
     return address_data, permits
 
 
-
-
