@@ -909,11 +909,11 @@ def search_stream(
                         
                         record_data = {
                             "record_id": rec_id,
-                            "permit_number": record.get("PermitNumber") or rec_id,
+                            "permit_number": record.get("PermitNumber", "PermitID", "PermitNum") or rec_id,
                             "address": record.get("SearchAddress") or record.get("OriginalAddress1") or "Address not available",
                             "city": record.get("OriginalCity") or record.get("City") or "",
                             "zip": record.get("OriginalZip") or record.get("ZipCode") or "",
-                            "work_description": record.get("WorkDescription") or "",
+                            "work_description": record.get("WorkDescription", "WorkType", "Desc1-Desc10") or "",
                             "status": record.get("StatusCurrentMapped") or record.get("StatusCurrent") or "",
                             "applied_date": record.get("AppliedDate") or record.get("ApplicationDate") or "",
                             "table": "shovels_api"
