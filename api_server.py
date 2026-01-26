@@ -792,7 +792,7 @@ def facets(field: str = Query(...), max_items: int = Query(200)):
     values: List[str] = []
     sample_records: List[dict] = []
     max_items = max(1, min(int(max_items or 200), 5000))
-    is_permit_id_req = field.lower() in ("permit", "permit_number", "permitnumber", "permitnum", "ticket", "ticket_number", "ticketnumber")
+    is_permit_id_req = field.lower() in ("permit", "PermitNum", "PermitNumber", "PermitID" , "permit_number", "permitnumber", "ticket", "ticket_number", "ticketnumber")
 
     if not src_container:
         return JSONResponse({"field": field, "values": [], "samples": [], "error": "SRC_CONTAINER not configured or cannot connect to Azure."})
@@ -909,7 +909,7 @@ def search_stream(
                         
                         record_data = {
                             "record_id": rec_id,
-                            "permit_number": record.get("PermitNumber", "PermitID", "PermitNum"),
+                            "permit_number": record.get("PermitNumber", "PermitNum", "PermitID"),
                             "address": record.get("SearchAddress") or record.get("OriginalAddress1") or "Address not available",
                             "city": record.get("OriginalCity") or record.get("City") or "",
                             "zip": record.get("OriginalZip") or record.get("ZipCode") or "",
@@ -1044,7 +1044,7 @@ def search_stream(
                                 where_parts.append(f"({' OR '.join(zip_conditions)})")
 
                         if permit:
-                            permit_cols = ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
+                            permit_cols = ["PermitNumber", "PermitID", "PermitNum", "Permit_Number", "Permit"]
                             for col in permit_cols:
                                 if col in columns:
                                     where_parts.append(f"AND {col} = ?")
@@ -1081,7 +1081,7 @@ def search_stream(
                                 # Prepare record for display
                                 record_data = {
                                     "record_id": rec_id,
-                                    "permit_number": rec.get("PermitNumber") or rec.get("PermitNum") or rec_id,
+                                    "permit_number": rec.get("PermitNumber") or rec.get("PermitNum") or rec.get("PermitID") or rec_id,
                                     "address": rec.get("SearchAddress") or rec.get("OriginalAddress1") or rec.get("AddressDescription") or "Address not available",
                                     "city": rec.get("OriginalCity") or rec.get("City") or "",
                                     "zip": rec.get("OriginalZip") or rec.get("ZipCode") or "",
@@ -1198,7 +1198,7 @@ def search(
                 record = map_shovels_response_to_record(address_data, permit_data)
                 rec_id = pick_id_from_record(record)
                 record["record_id"] = rec_id
-                record["permit_number"] = record.get("PermitNumber") or rec_id
+                record["permit_number"] = record.get("PermitNumber") or rec.get("PermitNum") or rec.get("PermitID") or rec_id
                 record["address"] = record.get("SearchAddress") or record.get("OriginalAddress1") or "Address not available"
                 record["city"] = record.get("OriginalCity") or record.get("City") or ""
                 record["zip"] = record.get("OriginalZip") or record.get("ZipCode") or ""
@@ -1525,7 +1525,7 @@ def search(
                     # Step 3: Permit number filter (strict match if provided)
                     if permit:
                         logging.info("Applying permit number filter: '%s'", permit)
-                        permit_cols = ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
+                        permit_cols = ["PermitNumber", "PermitNum", "PermitID" "Permit_Number", "Permit"]
                         permit_col = None
                         for col in permit_cols:
                             if col in columns:
@@ -1603,8 +1603,8 @@ def search(
             for rec in all_results[:max_results]:
                 rec_id = pick_id_from_record(rec)
                 # Add basic display fields without generating PDF
-                rec["record_id"] = rec_id
-                rec["permit_number"] = rec.get("PermitNumber") or rec.get("PermitNum") or rec_id
+                rec["record_id"] = rec_id 
+                rec["permit_number"] = rec.get("PermitNumber") or rec.get("PermitNum") or rec.get("PermitID") or rec_id
                 rec["address"] = rec.get("SearchAddress") or rec.get("OriginalAddress1") or rec.get("AddressDescription") or "Address not available"
                 rec["city"] = rec.get("OriginalCity") or rec.get("City") or ""
                 rec["zip"] = rec.get("OriginalZip") or rec.get("ZipCode") or ""
@@ -1697,7 +1697,7 @@ async def generate_pdf_for_record(request: Request):
                     columns = [column[0] for column in cursor.description]
                     
                     # Try all ID candidate columns
-                    id_cols = ID_CANDIDATES + ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
+                    id_cols = ID_CANDIDATES + ["PermitNumber", "PermitNum", "PermitID", "Permit_Number", "Permit"]
                     for col in id_cols:
                         if col in columns:
                             try:
@@ -1888,6 +1888,7 @@ def map_shovels_response_to_record(address_data: dict, permit_data: dict) -> dic
         "PermitNumber": permit_number,
         "PermitNum": permit_number,
         "PermitType": permit_type,
+        "PermitID": permit_number,
         "StatusDesc": permit_type,  # For Orlando compatibility
         "WorkDescription": description,
         "ProjectDescription": description,
@@ -2161,7 +2162,7 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
             "permit": {
                 "class": permit_class,
                 "classification": permit_classification,
-                "number": get_field_value(record, "PermitNum", "PermitNumber", "Permit_Number", "Permit"),
+                "number": get_field_value(record, "PermitNum", "PermitNumber", "PermitID", "Permit_Number", "Permit"),
                 # Orlando: StatusDesc → Permit Type
                 "type": get_field_value(record, "StatusDesc", "PermitType", "Type", "ApplicationType", "WorkType"),
                 # Orlando: PermitType → Type Classification
