@@ -265,7 +265,7 @@ def render_enhanced_certificate_pdf_bytes(record: dict, id_col: str, all_fields:
             "online_record_url": record.get("Link", "") or record.get("OnlineRecord", "") or "https://aca.tampagov.net/citizenaccess/",
             "publisher": record.get("Publisher", "TAMPA"),
         },
-        "work_description": record.get("WorkDescription", "") or record.get("ProjectDescription", ""),
+        "work_description": record.get("WorkDescription", "") or record.get("ProjectDescription", "") or record.get("Description", ""),
         "map_image_url": generate_map_placeholder_url(),
         # both forms provided for templates that expect data URI or plain base64
         "logo_image_url": logo_data_uri,
