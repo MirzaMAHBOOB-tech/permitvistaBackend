@@ -1978,6 +1978,12 @@ def get_field_value(record: dict, *field_names: str) -> str:
             return str(value).strip()
     return ""
 
+def generate_certificate_number() -> str:
+    """
+    Generate a random 7-digit certificate number
+    """
+    return str(random.randint(1000000, 9999999))
+
 def parse_address_components(address: str) -> Tuple[str, str, str]:
     """
     Extract city, state, and zip code from address string like '1708 LAKESIDE DR ORLANDO FL 32803'
@@ -2047,6 +2053,7 @@ def parse_address_components(address: str) -> Tuple[str, str, str]:
         zip_code = zip_match.group(1)
     
     return city, state, zip_code
+
 
 def generate_pdf_from_template(record: dict, template_path: str) -> str:
     tmpdir = tempfile.gettempdir()
@@ -2141,12 +2148,6 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
 
         # Publisher - try multiple variations
         publisher = get_field_value(record, "Publisher", "Source", "DataSource", "Origin")
-
-        def generate_certificate_number() -> str:
-            """
-            Generate a random 7-digit certificate number
-            """
-            return str(random.randint(1000000, 9999999))
 
         # ensure 'other' exists so templates referencing other.* don't break
         ctx = {
