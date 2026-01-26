@@ -1085,7 +1085,7 @@ def search_stream(
                                     "address": rec.get("SearchAddress") or rec.get("OriginalAddress1") or rec.get("AddressDescription") or "Address not available",
                                     "city": rec.get("OriginalCity") or rec.get("City") or "",
                                     "zip": rec.get("OriginalZip") or rec.get("ZipCode") or "",
-                                    "work_description": rec.get("WorkDescription") or rec.get("ProjectDescription") or rec.get("Description") or "",
+                                    "work_description": rec.get("WorkType") or rec.get("Desc1-Desc10") or rec.get("Description") or "",
                                     "status": rec.get("StatusCurrentMapped") or rec.get("CurrentStatus") or "",
                                     "applied_date": rec.get("AppliedDate") or rec.get("ApplicationDate") or "",
                                     "table": table
@@ -1202,7 +1202,7 @@ def search(
                 record["address"] = record.get("SearchAddress") or record.get("OriginalAddress1") or "Address not available"
                 record["city"] = record.get("OriginalCity") or record.get("City") or ""
                 record["zip"] = record.get("OriginalZip") or record.get("ZipCode") or ""
-                record["work_description"] = record.get("WorkDescription") or record.get("Description") or ""
+                record["work_description"] = record.get("Desc1-Desc10") or record.get("WorkType") or record.get("Description") or ""
                 record["status"] = record.get("StatusCurrentMapped") or record.get("StatusCurrent") or ""
                 record["applied_date"] = record.get("AppliedDate") or record.get("ApplicationDate") or ""
                 record["table"] = "shovels_api"  # Mark as from Shovels API
@@ -1608,7 +1608,7 @@ def search(
                 rec["address"] = rec.get("SearchAddress") or rec.get("OriginalAddress1") or rec.get("AddressDescription") or "Address not available"
                 rec["city"] = rec.get("OriginalCity") or rec.get("City") or ""
                 rec["zip"] = rec.get("OriginalZip") or rec.get("ZipCode") or ""
-                rec["work_description"] = rec.get("WorkDescription") or rec.get("ProjectDescription") or rec.get("Description") or ""
+                rec["work_description"] = rec.get("WorkType") or rec.get("Desc1-Desc10") or rec.get("Description") or ""
                 rec["status"] = rec.get("StatusCurrentMapped") or rec.get("CurrentStatus") or ""
                 rec["applied_date"] = rec.get("AppliedDate") or rec.get("ApplicationDate") or ""
                 results.append(rec)
@@ -2187,8 +2187,8 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
                 "publisher": publisher
             },
             # Orlando: ProjectName → Work Description
-            "work_description": get_field_value(record, "Description", "ProjectName", "WorkDescription", "ProjectDescription", 
-                                              "WorkDesc", "Work_Description", "WorkType", "ProjectDesc"),
+            "work_description": get_field_value(record, "Description", "WorkDescription", "ProjectDescription", 
+                                              "Desc1-Desc10", "Work_Description", "WorkType", "ProjectDesc"),
             "logo_image_url": str((BASE_DIR / "Medias" / "badge.png").as_uri()) if (BASE_DIR / "Medias" / "badge.png").exists() else "",
             "map_image_url": str((BASE_DIR / "Medias" / "map.png").as_uri()) if (BASE_DIR / "Medias" / "map.png").exists() else "",
             "generated_on_date": datetime.now().strftime("%m/%d/%Y"),
