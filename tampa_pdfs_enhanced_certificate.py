@@ -17,7 +17,6 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 import time
-import random
 from dotenv import load_dotenv
 import pandas as pd
 from slugify import slugify
@@ -192,12 +191,6 @@ def upload_pdf_bytes_to_azure(container_client: ContainerClient, blob_path: str,
     except Exception as e:
         log("Azure upload failed: " + str(e), "error")
         return False
-
-def generate_certificate_number() -> str:
-    """
-    Generate a random 7-digit certificate number
-    """
-    return str(random.randint(1000000, 9999999))
 
 
 # ------------------ Rendering ------------------

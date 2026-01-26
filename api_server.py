@@ -12,6 +12,7 @@ import pandas as pd
 from io import BytesIO
 import os
 import tempfile
+import random
 import logging
 import subprocess
 import time
@@ -912,7 +913,7 @@ def search_stream(
                             "address": record.get("SearchAddress") or record.get("OriginalAddress1") or "Address not available",
                             "city": record.get("OriginalCity") or record.get("City") or "",
                             "zip": record.get("OriginalZip") or record.get("ZipCode") or "",
-                            "work_description": record.get("WorkDescription") or record.get("Description") or "",
+                            "work_description": record.get("WorkDescription") or "",
                             "status": record.get("StatusCurrentMapped") or record.get("StatusCurrent") or "",
                             "applied_date": record.get("AppliedDate") or record.get("ApplicationDate") or "",
                             "table": "shovels_api"
@@ -2141,6 +2142,12 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
         # Publisher - try multiple variations
         publisher = get_field_value(record, "Publisher", "Source", "DataSource", "Origin")
 
+        def generate_certificate_number() -> str:
+            """
+            Generate a random 7-digit certificate number
+            """
+            return str(random.randint(1000000, 9999999))
+
         # ensure 'other' exists so templates referencing other.* don't break
         ctx = {
             "dates": {
@@ -2159,7 +2166,7 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
                 # Orlando: PermitType → Type Classification
                 "type_classification": get_field_value(record, "PermitType", "PermitTypeMapped", "TypeClassification", "Type"),
                 "id": permit_id,
-                "certificate_number": get_field_value(record, "certificate_number", "CertificateNo", "CertificateNumber", "CertNumber")
+                "certificate_number": generate_certificate_number(),
             },
             "property": {
                 "address_description": address_description,
