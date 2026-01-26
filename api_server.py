@@ -22,12 +22,15 @@ import re
 import secrets
 import json
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 # ----------------- Database Import -----------------
 import pyodbc
 from queue import Queue, Empty
 from contextlib import contextmanager
+
+# ----------------- Shovels API Import -----------------
+from shovels_api import get_permits_for_address, ShovelsAPIError
 
 # ----------------- Token Management for Privacy -----------------
 # Store token -> permit_id mapping (with expiration)
@@ -93,6 +96,10 @@ SRC_CONTAINER = os.getenv("SRC_CONTAINER")
 OUTPUT_CONTAINER = os.getenv("OUTPUT_CONTAINER")
 SAMPLE_PERMIT_LIMIT = int(os.getenv("SAMPLE_PERMIT_LIMIT", "1000"))
 MAX_CSV_FILES = int(os.getenv("MAX_CSV_FILES", "100"))
+
+# ----------------- Shovels API Configuration -----------------
+SHOVELS_API_KEY = os.getenv("SHOVELS_API_KEY", "")
+USE_SHOVELS_API = bool(SHOVELS_API_KEY)  # Use Shovels API if key is provided, else fallback to SQL
 
 # ----------------- Database Configuration -----------------
 DB_SERVER = os.getenv("DB_SERVER", "permitvista-db.database.windows.net")
@@ -856,17 +863,89 @@ def search_stream(
     """
     def generate():
         try:
+            input_addr = (address or "").strip()
+            if not input_addr:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'address parameter required'})}\n\n"
+                return
+
+            # Use Shovels API if configured
+            if USE_SHOVELS_API:
+                try:
+                    logging.info("SEARCH-STREAM (Shovels API) | address='%s' dates=%s..%s max=%s", 
+                                input_addr, date_from, date_to, max_results)
+                    
+                    # Format date range for Shovels API
+                    permit_from = date_from if date_from else "1990-01-01"
+                    permit_to = date_to if date_to else date.today().isoformat()
+                    
+                    # Call Shovels API
+                    address_data, permits_list = get_permits_for_address(
+                        address=input_addr,
+                        permit_from=permit_from,
+                        permit_to=permit_to
+                    )
+                    
+                    if not address_data:
+                        yield f"data: {json.dumps({'type': 'error', 'message': 'Address not found. Please verify the address and try again.'})}\n\n"
+                        return
+                    
+                    if not permits_list:
+                        yield f"data: {json.dumps({'type': 'error', 'message': 'No permit records found for this address.'})}\n\n"
+                        return
+                    
+                    # Filter by permit number if provided
+                    if permit:
+                        permits_list = [p for p in permits_list if p.get("number", "").upper() == permit.upper()]
+                    
+                    # Limit results
+                    permits_list = permits_list[:max_results]
+                    
+                    # Stream each permit as it's processed
+                    result_count = 0
+                    for permit_data in permits_list:
+                        record = map_shovels_response_to_record(address_data, permit_data)
+                        rec_id = pick_id_from_record(record)
+                        
+                        record_data = {
+                            "record_id": rec_id,
+                            "permit_number": record.get("PermitNumber") or rec_id,
+                            "address": record.get("SearchAddress") or record.get("OriginalAddress1") or "Address not available",
+                            "city": record.get("OriginalCity") or record.get("City") or "",
+                            "zip": record.get("OriginalZip") or record.get("ZipCode") or "",
+                            "work_description": record.get("WorkDescription") or record.get("Description") or "",
+                            "status": record.get("StatusCurrentMapped") or record.get("StatusCurrent") or "",
+                            "applied_date": record.get("AppliedDate") or record.get("ApplicationDate") or "",
+                            "table": "shovels_api"
+                        }
+                        
+                        result_count += 1
+                        yield f"data: {json.dumps({'type': 'record', 'data': record_data, 'count': result_count})}\n\n"
+                    
+                    # Send completion message
+                    yield f"data: {json.dumps({'type': 'complete', 'total': result_count})}\n\n"
+                    return
+                    
+                except ShovelsAPIError as e:
+                    error_msg = str(e)
+                    if "Invalid API key" in error_msg:
+                        yield f"data: {json.dumps({'type': 'error', 'message': 'System error. Please contact support.'})}\n\n"
+                    elif "Rate limit" in error_msg:
+                        yield f"data: {json.dumps({'type': 'error', 'message': 'Service temporarily unavailable. Please try again.'})}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'type': 'error', 'message': 'Service temporarily unavailable. Please try again.'})}\n\n"
+                    return
+                except Exception as e:
+                    logging.exception("Shovels API streaming error: %s", e)
+                    yield f"data: {json.dumps({'type': 'error', 'message': f'Search error: {str(e)}'})}\n\n"
+                    return
+            
+            # Fallback to SQL database if Shovels API not configured
             # Create local variables from function parameters
             local_street_number_q = street_number_q
             local_street_name_q = street_name_q
             local_street_type_q = street_type_q
             local_street_dir_q = street_dir_q
             local_zip_q = zip_q
-            
-            input_addr = (address or "").strip()
-            if not input_addr:
-                yield f"data: {json.dumps({'error': 'address parameter required'})}\n\n"
-                return
 
             with get_db_connection() as conn:
                 tables = get_table_name(city)
@@ -1060,14 +1139,114 @@ def search(
     """
     start_t = time.perf_counter()
     results: List[dict] = []
-    all_results: List[dict] = []  # Initialize here to ensure it's in scope
     
     # Validate address parameter
     input_addr = (address or "").strip()
     if not input_addr:
         raise HTTPException(status_code=400, detail="address parameter required")
     
-    # Get database connection from pool
+    # Use Shovels API if configured, otherwise fallback to SQL
+    if USE_SHOVELS_API:
+        try:
+            logging.info("SEARCH (Shovels API) | address='%s' dates=%s..%s max=%s", 
+                        input_addr, date_from, date_to, max_results)
+            
+            # Format date range for Shovels API
+            permit_from = date_from if date_from else "1990-01-01"
+            permit_to = date_to if date_to else date.today().isoformat()
+            
+            # Call Shovels API
+            address_data, permits_list = get_permits_for_address(
+                address=input_addr,
+                permit_from=permit_from,
+                permit_to=permit_to
+            )
+            
+            if not address_data:
+                logging.info("Shovels API: Address not found for '%s'", input_addr[:100])
+                return JSONResponse({
+                    "results": [],
+                    "message": "Address not found. Please verify the address and try again.",
+                    "duration_ms": int((time.perf_counter() - start_t) * 1000)
+                })
+            
+            if not permits_list:
+                logging.info("Shovels API: No permits found for address '%s'", input_addr[:100])
+                return JSONResponse({
+                    "results": [],
+                    "message": "No permit records found for this address.",
+                    "duration_ms": int((time.perf_counter() - start_t) * 1000)
+                })
+            
+            # Filter by permit number if provided
+            if permit:
+                permits_list = [p for p in permits_list if p.get("number", "").upper() == permit.upper()]
+                if not permits_list:
+                    logging.info("Shovels API: No permits match permit number '%s'", permit)
+                    return JSONResponse({
+                        "results": [],
+                        "message": f"No permits found matching permit number: {permit}",
+                        "duration_ms": int((time.perf_counter() - start_t) * 1000)
+                    })
+            
+            # Limit results
+            permits_list = permits_list[:max_results]
+            
+            # Map each permit to record format
+            for permit_data in permits_list:
+                record = map_shovels_response_to_record(address_data, permit_data)
+                rec_id = pick_id_from_record(record)
+                record["record_id"] = rec_id
+                record["permit_number"] = record.get("PermitNumber") or rec_id
+                record["address"] = record.get("SearchAddress") or record.get("OriginalAddress1") or "Address not available"
+                record["city"] = record.get("OriginalCity") or record.get("City") or ""
+                record["zip"] = record.get("OriginalZip") or record.get("ZipCode") or ""
+                record["work_description"] = record.get("WorkDescription") or record.get("Description") or ""
+                record["status"] = record.get("StatusCurrentMapped") or record.get("StatusCurrent") or ""
+                record["applied_date"] = record.get("AppliedDate") or record.get("ApplicationDate") or ""
+                record["table"] = "shovels_api"  # Mark as from Shovels API
+                results.append(record)
+            
+            dur_ms = int((time.perf_counter() - start_t) * 1000)
+            logging.info("SEARCH (Shovels API) done | results=%d duration_ms=%d", len(results), dur_ms)
+            
+            return JSONResponse({
+                "results": results,
+                "duration_ms": dur_ms,
+                "total_found": len(results)
+            })
+            
+        except ShovelsAPIError as e:
+            logging.error("Shovels API error: %s", str(e))
+            error_msg = str(e)
+            if "Invalid API key" in error_msg:
+                return JSONResponse({
+                    "results": [],
+                    "error": "System error. Please contact support.",
+                    "duration_ms": int((time.perf_counter() - start_t) * 1000)
+                }, status_code=500)
+            elif "Rate limit" in error_msg:
+                return JSONResponse({
+                    "results": [],
+                    "error": "Service temporarily unavailable. Please try again.",
+                    "duration_ms": int((time.perf_counter() - start_t) * 1000)
+                }, status_code=429)
+            else:
+                return JSONResponse({
+                    "results": [],
+                    "error": "Service temporarily unavailable. Please try again.",
+                    "duration_ms": int((time.perf_counter() - start_t) * 1000)
+                }, status_code=500)
+        except Exception as e:
+            logging.exception("Shovels API search error: %s", e)
+            return JSONResponse({
+                "results": [],
+                "error": f"Search error: {str(e)}",
+                "duration_ms": int((time.perf_counter() - start_t) * 1000)
+            }, status_code=500)
+    
+    # Fallback to SQL database if Shovels API not configured
+    all_results: List[dict] = []
     try:
         with get_db_connection() as conn:
             # Determine which table(s) to query based on city
@@ -1462,81 +1641,117 @@ async def generate_pdf_for_record(request: Request):
     Should complete in <1 second.
     """
     try:
-        record_data = await request.json()
-        permit_id = record_data.get("record_id") or record_data.get("permit_number")
+        request_data = await request.json()
+        permit_id = request_data.get("record_id") or request_data.get("permit_number")
         if not permit_id:
             raise HTTPException(status_code=400, detail="record_id or permit_number required")
 
-            # Find record in database
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
-            record = None
-            source_table = None
-
-            for table in tables:
-                try:
-                    # First, get column names to check what's available
-                    cursor.execute(f"SELECT TOP 1 * FROM {table}")
-                    columns = [column[0] for column in cursor.description]
-                    
-                    # Try all ID candidate columns
-                    id_cols = ID_CANDIDATES + ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
-                    for col in id_cols:
-                        if col in columns:
-                            try:
-                                cursor.execute(f"SELECT TOP 1 * FROM {table} WHERE {col} = ?", (permit_id,))
-                                row = cursor.fetchone()
-                                if row:
-                                    record = {c: (str(val) if val is not None else "") for c, val in zip(columns, row)}
-                                    source_table = table
-                                    logging.info("✅ Found record in table %s using PERMIT column %s with value %s", table, col, permit_id)
-                                    logging.info("Record has %d columns. Sample fields: %s", len(columns), list(columns)[:10])
-                                    break
-                            except Exception as e:
-                                logging.debug("Error querying column %s in table %s: %s", col, table, e)
-                                continue
-                    if record:
+        # Check if full record data is provided (from Shovels API or frontend)
+        if "record" in request_data and isinstance(request_data["record"], dict):
+            record = request_data["record"]
+            source_table = record.get("table", "unknown")
+            logging.info("Using provided record data for permit_id=%s from table=%s", permit_id, source_table)
+        elif request_data.get("table") == "shovels_api" and USE_SHOVELS_API:
+            # Record is from Shovels API - need to re-fetch it
+            # This requires address and permit number
+            address = request_data.get("address", "")
+            if not address:
+                raise HTTPException(status_code=400, detail="Address required for Shovels API record lookup")
+            
+            try:
+                # Search address and permits
+                address_data, permits_list = get_permits_for_address(address=address)
+                if not address_data or not permits_list:
+                    raise HTTPException(status_code=404, detail=f"Record not found for permit: {permit_id}")
+                
+                # Find the specific permit
+                permit_data = None
+                for p in permits_list:
+                    if p.get("number", "").upper() == permit_id.upper():
+                        permit_data = p
                         break
-                except Exception as e:
-                    logging.debug("Error searching table %s: %s", table, e)
-                    continue
+                
+                if not permit_data:
+                    raise HTTPException(status_code=404, detail=f"Permit {permit_id} not found")
+                
+                # Map to record format
+                record = map_shovels_response_to_record(address_data, permit_data)
+                source_table = "shovels_api"
+                logging.info("Fetched record from Shovels API for permit_id=%s", permit_id)
+            except ShovelsAPIError as e:
+                logging.error("Shovels API error in generate-pdf: %s", str(e))
+                raise HTTPException(status_code=500, detail=f"API error: {str(e)}")
+        else:
+            # Fallback to SQL database search
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
+                record = None
+                source_table = None
 
-            if not record:
-                logging.warning("Record not found for permit_id=%s in any table", permit_id)
-                raise HTTPException(status_code=404, detail=f"Record not found for ID: {permit_id}")
+                for table in tables:
+                    try:
+                        # First, get column names to check what's available
+                        cursor.execute(f"SELECT TOP 1 * FROM {table}")
+                        columns = [column[0] for column in cursor.description]
+                        
+                        # Try all ID candidate columns
+                        id_cols = ID_CANDIDATES + ["PermitNumber", "PermitNum", "Permit_Number", "Permit"]
+                        for col in id_cols:
+                            if col in columns:
+                                try:
+                                    cursor.execute(f"SELECT TOP 1 * FROM {table} WHERE {col} = ?", (permit_id,))
+                                    row = cursor.fetchone()
+                                    if row:
+                                        record = {c: (str(val) if val is not None else "") for c, val in zip(columns, row)}
+                                        source_table = table
+                                        logging.info("✅ Found record in table %s using PERMIT column %s with value %s", table, col, permit_id)
+                                        logging.info("Record has %d columns. Sample fields: %s", len(columns), list(columns)[:10])
+                                        break
+                                except Exception as e:
+                                    logging.debug("Error querying column %s in table %s: %s", col, table, e)
+                                    continue
+                        if record:
+                            break
+                    except Exception as e:
+                        logging.debug("Error searching table %s: %s", table, e)
+                        continue
 
-            # Store source table in record for PDF generation context
-            record["_source_table"] = source_table
-            
-            # Log record details before PDF generation
-            logging.info("✅ Found record in table %s using PERMIT column PermitNumber with value %s", source_table, permit_id)
-            logging.info("Record has %d columns. Sample fields: %s", len(record.keys()), list(record.keys())[:10])
-            
-            # Log key Orlando fields
-            key_fields = ["PermitAddress", "Status", "StatusDesc", "PermitType", "PermitClass", 
-                         "Parcel", "ProjectName", "IssuePermitDate"]
-            for field in key_fields:
-                if field in record:
-                    val = str(record[field])[:150] if record[field] else "EMPTY"
-                    logging.info("  [%s] = %s", field, val)
+                if not record:
+                    logging.warning("Record not found for permit_id=%s in any table", permit_id)
+                    raise HTTPException(status_code=404, detail=f"Record not found for ID: {permit_id}")
 
-            # Generate PDF
-            pdf_start = time.perf_counter()
-            pdf_path = generate_pdf_from_template(record, str(TEMPLATES_DIR / "certificate-placeholder.html"))
-            pdf_time = time.perf_counter() - pdf_start
+                # Store source table in record for PDF generation context
+                record["_source_table"] = source_table
 
-            rec_id = pick_id_from_record(record)
-            token = create_token_for_permit(rec_id)
-            
-            logging.info("PDF generated in %.2fms for record %s", pdf_time * 1000, rec_id)
+        # Log record details before PDF generation
+        logging.info("Generating PDF for permit_id=%s from source=%s", permit_id, record.get("_source_table", "unknown"))
+        logging.info("Record has %d columns. Sample fields: %s", len(record.keys()), list(record.keys())[:10])
+        
+        # Log key fields
+        key_fields = ["PermitAddress", "Status", "StatusDesc", "PermitType", "PermitClass", 
+                     "Parcel", "ProjectName", "IssuePermitDate", "PermitNumber"]
+        for field in key_fields:
+            if field in record:
+                val = str(record[field])[:150] if record[field] else "EMPTY"
+                logging.info("  [%s] = %s", field, val)
 
-            return JSONResponse({
-                "success": True,
-                "view_url": f"/view/{token}",
-                "download_url": f"/download/{token}.pdf",
-                "generation_time_ms": int(pdf_time * 1000)
-            })
+        # Generate PDF
+        pdf_start = time.perf_counter()
+        pdf_path = generate_pdf_from_template(record, str(TEMPLATES_DIR / "certificate-placeholder.html"))
+        pdf_time = time.perf_counter() - pdf_start
+
+        rec_id = pick_id_from_record(record)
+        token = create_token_for_permit(rec_id)
+        
+        logging.info("PDF generated in %.2fms for record %s", pdf_time * 1000, rec_id)
+
+        return JSONResponse({
+            "success": True,
+            "view_url": f"/view/{token}",
+            "download_url": f"/download/{token}.pdf",
+            "generation_time_ms": int(pdf_time * 1000)
+        })
 
     except Exception as e:
         logging.exception("PDF generation error: %s", e)
@@ -1601,6 +1816,157 @@ def get_record(permit_id: str = Query(...)):
     view_url = f"/view/{token}"
     download_url = f"/download/{token}.pdf"
     return JSONResponse({"record": record, "view_url": view_url, "download_url": download_url})
+
+# ----------------- Shovels API Response Mapping -----------------
+def map_shovels_response_to_record(address_data: dict, permit_data: dict) -> dict:
+    """
+    Map Shovels API response to existing record format for PDF generation
+    
+    Args:
+        address_data: Address data from Shovels API (from addresses/search)
+        permit_data: Permit data from Shovels API (from permits/search)
+    
+    Returns:
+        Record dict in existing format compatible with PDF generation
+    """
+    # Build property address from Shovels address fields
+    # Prefer "name" field (full formatted address) if available
+    full_address = address_data.get("name", "")
+    if not full_address:
+        # Build from components if name not available
+        street_no = address_data.get("street_no", "")
+        street = address_data.get("street", "")
+        address_parts = []
+        if street_no:
+            address_parts.append(street_no)
+        if street:
+            address_parts.append(street)
+        full_address = " ".join(address_parts).strip() if address_parts else ""
+    
+    city = address_data.get("city", "")
+    state = address_data.get("state", "")
+    zip_code = address_data.get("zip_code", "")
+    
+    # Map permit fields
+    permit_number = permit_data.get("number", "")
+    permit_type = permit_data.get("type", "")
+    description = permit_data.get("description", "")
+    status = permit_data.get("status", "")
+    
+    # Map status to existing format
+    status_mapped = ""
+    if status == "final":
+        status_mapped = "Permit Finaled"
+    elif status == "active":
+        status_mapped = "Active"
+    elif status == "in_review":
+        status_mapped = "In Review"
+    elif status == "inactive":
+        status_mapped = "Inactive"
+    else:
+        status_mapped = status.title() if status else ""
+    
+    # Format dates
+    file_date = permit_data.get("file_date", "")
+    issue_date = permit_data.get("issue_date", "")
+    final_date = permit_data.get("final_date", "")
+    
+    # Format job value (divide by 100 for dollars)
+    job_value = permit_data.get("job_value")
+    if job_value:
+        try:
+            job_value = float(job_value) / 100.0
+        except (ValueError, TypeError):
+            job_value = ""
+    else:
+        job_value = ""
+    
+    # Build record in existing format
+    record = {
+        # Permit fields
+        "PermitNumber": permit_number,
+        "PermitNum": permit_number,
+        "PermitType": permit_type,
+        "StatusDesc": permit_type,  # For Orlando compatibility
+        "WorkDescription": description,
+        "ProjectDescription": description,
+        "Description": description,
+        "Status": status,
+        "StatusCurrent": status,
+        "StatusCurrentMapped": status_mapped,
+        "ApplicationStatus": status,
+        
+        # Address fields
+        "PermitAddress": full_address,
+        "SearchAddress": full_address,
+        "OriginalAddress1": full_address,
+        "AddressDescription": full_address,
+        "Address": full_address,
+        "PropertyAddress": full_address,
+        
+        # Location fields
+        "OriginalCity": city,
+        "City": city,
+        "PropertyCity": city,
+        "OriginalState": state,
+        "State": state,
+        "OriginalZip": zip_code,
+        "ZipCode": zip_code,
+        "ZIP": zip_code,
+        "Zip": zip_code,
+        
+        # Date fields
+        "AppliedDate": file_date,
+        "ApplicationDate": file_date,
+        "IssuePermitDate": issue_date,  # For Orlando compatibility
+        "IssueDate": issue_date,
+        "CompletedDate": final_date,
+        "FinalDate": final_date,
+        "ExpiresDate": "",
+        "LastUpdated": "",
+        "StatusDate": "",
+        
+        # Permit class/type
+        "PermitClass": permit_type,
+        "PermitClassMapped": permit_type,
+        "PermitClassification": permit_type,
+        
+        # Other fields
+        "Parcel": address_data.get("parcel_id", ""),
+        "ParcelNumber": address_data.get("parcel_id", ""),
+        "PIN": address_data.get("parcel_id", ""),
+        "ProjectName": description,  # For Orlando compatibility
+        "Owner": address_data.get("property_legal_owner", ""),
+        "Publisher": "Shovels API",
+        "Link": "",
+        
+        # Job value
+        "JobValue": str(job_value) if job_value else "",
+        
+        # Tags/categories
+        "Tags": ", ".join(permit_data.get("tags", [])) if permit_data.get("tags") else "",
+        
+        # Jurisdiction
+        "Jurisdiction": permit_data.get("jurisdiction", ""),
+        
+        # Contractor
+        "ContractorID": permit_data.get("contractor_id", ""),
+        
+        # Property info (if available in address_data)
+        "PropertyYearBuilt": str(address_data.get("property_year_built", "")) if address_data.get("property_year_built") else "",
+        "PropertyBuildingArea": str(address_data.get("property_building_area", "")) if address_data.get("property_building_area") else "",
+        "PropertyLotSize": str(address_data.get("property_lot_size", "")) if address_data.get("property_lot_size") else "",
+        "PropertyType": address_data.get("property_type_detail", ""),
+        "PropertyStories": str(address_data.get("property_story_count", "")) if address_data.get("property_story_count") else "",
+        "PropertyAssessedValue": str(address_data.get("property_assess_market_value", "")) if address_data.get("property_assess_market_value") else "",
+        
+        # Coordinates
+        "Latitude": str(address_data.get("lat", "")) if address_data.get("lat") else "",
+        "Longitude": str(address_data.get("long", "")) if address_data.get("long") else "",
+    }
+    
+    return record
+
 
 # ----------------- PDF generation, view and download endpoints -----------------
 def get_field_value(record: dict, *field_names: str) -> str:
