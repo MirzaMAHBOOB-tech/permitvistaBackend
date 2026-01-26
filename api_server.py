@@ -1683,10 +1683,10 @@ async def generate_pdf_for_record(request: Request):
                 raise HTTPException(status_code=500, detail=f"API error: {str(e)}")
         else:
             # Fallback to SQL database search
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
-            record = None
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
+                record = None
                 source_table = None
 
             for table in tables:
@@ -1704,9 +1704,9 @@ async def generate_pdf_for_record(request: Request):
                                 row = cursor.fetchone()
                                 if row:
                                     record = {c: (str(val) if val is not None else "") for c, val in zip(columns, row)}
-                                        source_table = table
-                                        logging.info("✅ Found record in table %s using PERMIT column %s with value %s", table, col, permit_id)
-                                        logging.info("Record has %d columns. Sample fields: %s", len(columns), list(columns)[:10])
+                                    source_table = table
+                                    logging.info("✅ Found record in table %s using PERMIT column %s with value %s", table, col, permit_id)
+                                    logging.info("Record has %d columns. Sample fields: %s", len(columns), list(columns)[:10])
                                     break
                             except Exception as e:
                                 logging.debug("Error querying column %s in table %s: %s", col, table, e)
