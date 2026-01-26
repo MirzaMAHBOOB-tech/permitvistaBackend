@@ -909,7 +909,7 @@ def search_stream(
                         
                         record_data = {
                             "record_id": rec_id,
-                            "permit_number": record.get("PermitNumber", "PermitID", "PermitNum") or rec_id,
+                            "permit_number": record.get("PermitNumber", "PermitID", "PermitNum"),
                             "address": record.get("SearchAddress") or record.get("OriginalAddress1") or "Address not available",
                             "city": record.get("OriginalCity") or record.get("City") or "",
                             "zip": record.get("OriginalZip") or record.get("ZipCode") or "",
