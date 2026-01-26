@@ -2187,8 +2187,7 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
                 "publisher": publisher
             },
             # Orlando: ProjectName → Work Description
-            "work_description": get_field_value(record, "Description", "WorkDescription", "ProjectDescription", 
-                                              "Desc1-Desc10", "Work_Description", "WorkType", "ProjectDesc"),
+            "work_description": get_field_value(record, "Description", "WorkDescription", "Desc1-Desc10", "Work_Description", "WorkType", "ProjectDesc"),
             "logo_image_url": str((BASE_DIR / "Medias" / "badge.png").as_uri()) if (BASE_DIR / "Medias" / "badge.png").exists() else "",
             "map_image_url": str((BASE_DIR / "Medias" / "map.png").as_uri()) if (BASE_DIR / "Medias" / "map.png").exists() else "",
             "generated_on_date": datetime.now().strftime("%m/%d/%Y"),
