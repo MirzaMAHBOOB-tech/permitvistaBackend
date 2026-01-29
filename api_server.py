@@ -1198,7 +1198,7 @@ def search(
                 record = map_shovels_response_to_record(address_data, permit_data)
                 rec_id = pick_id_from_record(record)
                 record["record_id"] = rec_id
-                record["permit_number"] = record.get("PermitNumber") or rec.get("PermitNum") or rec.get("PermitID") or rec_id
+                record["permit_number"] = record.get("PermitNumber") or record.get("PermitNum") or record.get("PermitID") or rec_id
                 record["address"] = record.get("SearchAddress") or record.get("OriginalAddress1") or "Address not available"
                 record["city"] = record.get("OriginalCity") or record.get("City") or ""
                 record["zip"] = record.get("OriginalZip") or record.get("ZipCode") or ""
@@ -1684,46 +1684,49 @@ async def generate_pdf_for_record(request: Request):
                 raise HTTPException(status_code=500, detail=f"API error: {str(e)}")
         else:
             # Fallback to SQL database search
+            # FIX: Entire for loop must be INSIDE the with block
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 tables = ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
                 record = None
                 source_table = None
 
-            for table in tables:
-                try:
-                    # First, get column names to check what's available
-                    cursor.execute(f"SELECT TOP 1 * FROM {table}")
-                    columns = [column[0] for column in cursor.description]
-                    
-                    # Try all ID candidate columns
-                    id_cols = ID_CANDIDATES + ["PermitNumber", "PermitNum", "PermitID", "Permit_Number", "Permit"]
-                    for col in id_cols:
-                        if col in columns:
-                            try:
-                                cursor.execute(f"SELECT TOP 1 * FROM {table} WHERE {col} = ?", (permit_id,))
-                                row = cursor.fetchone()
-                                if row:
-                                    record = {c: (str(val) if val is not None else "") for c, val in zip(columns, row)}
-                                    source_table = table
-                                    logging.info("✅ Found record in table %s using PERMIT column %s with value %s", table, col, permit_id)
-                                    logging.info("Record has %d columns. Sample fields: %s", len(columns), list(columns)[:10])
-                                    break
-                            except Exception as e:
-                                logging.debug("Error querying column %s in table %s: %s", col, table, e)
-                                continue
-                    if record:
-                        break
-                except Exception as e:
-                    logging.debug("Error searching table %s: %s", table, e)
-                    continue
+                # FIX: This for loop is now correctly INSIDE the with block
+                for table in tables:
+                    try:
+                        # First, get column names to check what's available
+                        cursor.execute(f"SELECT TOP 1 * FROM {table}")
+                        columns = [column[0] for column in cursor.description]
+                        
+                        # Try all ID candidate columns
+                        id_cols = ID_CANDIDATES + ["PermitNumber", "PermitNum", "PermitID", "Permit_Number", "Permit"]
+                        for col in id_cols:
+                            if col in columns:
+                                try:
+                                    cursor.execute(f"SELECT TOP 1 * FROM {table} WHERE {col} = ?", (permit_id,))
+                                    row = cursor.fetchone()
+                                    if row:
+                                        record = {c: (str(val) if val is not None else "") for c, val in zip(columns, row)}
+                                        source_table = table
+                                        logging.info("✅ Found record in table %s using PERMIT column %s with value %s", table, col, permit_id)
+                                        logging.info("Record has %d columns. Sample fields: %s", len(columns), list(columns)[:10])
+                                        break
+                                except Exception as e:
+                                    logging.debug("Error querying column %s in table %s: %s", col, table, e)
+                                    continue
+                        if record:
+                            break
+                    except Exception as e:
+                        logging.debug("Error searching table %s: %s", table, e)
+                        continue
 
+            # FIX: This check is now OUTSIDE the with block but the for loop ran INSIDE it
             if not record:
                 logging.warning("Record not found for permit_id=%s in any table", permit_id)
                 raise HTTPException(status_code=404, detail=f"Record not found for ID: {permit_id}")
 
-                # Store source table in record for PDF generation context
-                record["_source_table"] = source_table
+            # FIX: This line is now OUTSIDE the if block (was dead code before)
+            record["_source_table"] = source_table
 
         # Log record details before PDF generation
         logging.info("Generating PDF for permit_id=%s from source=%s", permit_id, record.get("_source_table", "unknown"))
@@ -1737,22 +1740,22 @@ async def generate_pdf_for_record(request: Request):
                 val = str(record[field])[:150] if record[field] else "EMPTY"
                 logging.info("  [%s] = %s", field, val)
 
-            # Generate PDF
-            pdf_start = time.perf_counter()
-            pdf_path = generate_pdf_from_template(record, str(TEMPLATES_DIR / "certificate-placeholder.html"))
-            pdf_time = time.perf_counter() - pdf_start
+        # FIX: PDF generation is now OUTSIDE the for loop (correct indentation)
+        pdf_start = time.perf_counter()
+        pdf_path = generate_pdf_from_template(record, str(TEMPLATES_DIR / "certificate-placeholder.html"))
+        pdf_time = time.perf_counter() - pdf_start
 
-            rec_id = pick_id_from_record(record)
-            token = create_token_for_permit(rec_id)
-            
-            logging.info("PDF generated in %.2fms for record %s", pdf_time * 1000, rec_id)
+        rec_id = pick_id_from_record(record)
+        token = create_token_for_permit(rec_id)
+        
+        logging.info("PDF generated in %.2fms for record %s", pdf_time * 1000, rec_id)
 
-            return JSONResponse({
-                "success": True,
-                "view_url": f"/view/{token}",
-                "download_url": f"/download/{token}.pdf",
-                "generation_time_ms": int(pdf_time * 1000)
-            })
+        return JSONResponse({
+            "success": True,
+            "view_url": f"/view/{token}",
+            "download_url": f"/download/{token}.pdf",
+            "generation_time_ms": int(pdf_time * 1000)
+        })
 
     except Exception as e:
         logging.exception("PDF generation error: %s", e)
@@ -1829,12 +1832,16 @@ def map_shovels_response_to_record(address_data: dict, permit_data: dict) -> dic
     
     Returns:
         Record dict in existing format compatible with PDF generation
+    
+    Note: Property enrichment data (owner, year_built, assessed_value, etc.) comes from
+    the PERMIT response, not the address response. Data quality varies by county:
+    - Broward, Orange, Volusia, Brevard, Osceola: Full property data
+    - Sarasota, Palm Beach: Partial property data
+    - Jacksonville, Tallahassee: Minimal data (descriptions only)
     """
     # Build property address from Shovels address fields
-    # Prefer "name" field (full formatted address) if available
     full_address = address_data.get("name", "")
     if not full_address:
-        # Build from components if name not available
         street_no = address_data.get("street_no", "")
         street = address_data.get("street", "")
         address_parts = []
@@ -1864,32 +1871,74 @@ def map_shovels_response_to_record(address_data: dict, permit_data: dict) -> dic
         status_mapped = "In Review"
     elif status == "inactive":
         status_mapped = "Inactive"
-    else:
-        status_mapped = status.title() if status else ""
+    elif status:
+        status_mapped = status.replace("_", " ").title()
     
-    # Format dates
-    file_date = permit_data.get("file_date", "")
-    issue_date = permit_data.get("issue_date", "")
-    final_date = permit_data.get("final_date", "")
+    # Format dates (handle None values)
+    file_date = permit_data.get("file_date") or ""
+    issue_date = permit_data.get("issue_date") or ""
+    final_date = permit_data.get("final_date") or ""
     
-    # Format job value (divide by 100 for dollars)
+    # Format job value (Shovels returns cents, convert to dollars)
     job_value = permit_data.get("job_value")
+    job_value_formatted = ""
     if job_value:
         try:
-            job_value = float(job_value) / 100.0
+            dollars = float(job_value) / 100.0
+            job_value_formatted = f"${dollars:,.2f}"
         except (ValueError, TypeError):
-            job_value = ""
-    else:
-        job_value = ""
+            job_value_formatted = ""
     
-    # Build record in existing format
+    # Format fees (Shovels returns cents, convert to dollars)
+    fees = permit_data.get("fees")
+    fees_formatted = ""
+    if fees:
+        try:
+            dollars = float(fees) / 100.0
+            fees_formatted = f"${dollars:,.2f}"
+        except (ValueError, TypeError):
+            fees_formatted = ""
+    
+    # ==========================================================================
+    # IMPORTANT: Property data comes from PERMIT response, not address response
+    # This is the key fix - the original code was looking in address_data
+    # ==========================================================================
+    property_legal_owner = permit_data.get("property_legal_owner") or ""
+    property_year_built = permit_data.get("property_year_built")
+    property_building_area = permit_data.get("property_building_area")
+    property_story_count = permit_data.get("property_story_count")
+    property_assess_value = permit_data.get("property_assess_market_value")
+    property_type = permit_data.get("property_type") or ""
+    property_type_detail = permit_data.get("property_type_detail") or ""
+    
+    # Format building area (square feet)
+    building_area_formatted = ""
+    if property_building_area:
+        try:
+            sqft = int(property_building_area)
+            building_area_formatted = f"{sqft:,} sq ft"
+        except (ValueError, TypeError):
+            building_area_formatted = ""
+    
+    # Format assessed value (Shovels returns cents)
+    assessed_value_formatted = ""
+    if property_assess_value:
+        try:
+            dollars = float(property_assess_value) / 100.0
+            assessed_value_formatted = f"${dollars:,.0f}"
+        except (ValueError, TypeError):
+            assessed_value_formatted = ""
+    
+    # Build record in existing format compatible with PDF template
     record = {
-        # Permit fields
+        # ======================================================================
+        # PERMIT FIELDS
+        # ======================================================================
         "PermitNumber": permit_number,
         "PermitNum": permit_number,
         "PermitType": permit_type,
         "PermitID": permit_number,
-        "StatusDesc": permit_type,  # For Orlando compatibility
+        "StatusDesc": permit_type,
         "WorkDescription": description,
         "ProjectDescription": description,
         "Description": description,
@@ -1898,7 +1947,9 @@ def map_shovels_response_to_record(address_data: dict, permit_data: dict) -> dic
         "StatusCurrentMapped": status_mapped,
         "ApplicationStatus": status,
         
-        # Address fields
+        # ======================================================================
+        # ADDRESS FIELDS
+        # ======================================================================
         "PermitAddress": full_address,
         "SearchAddress": full_address,
         "OriginalAddress1": full_address,
@@ -1906,7 +1957,9 @@ def map_shovels_response_to_record(address_data: dict, permit_data: dict) -> dic
         "Address": full_address,
         "PropertyAddress": full_address,
         
-        # Location fields
+        # ======================================================================
+        # LOCATION FIELDS
+        # ======================================================================
         "OriginalCity": city,
         "City": city,
         "PropertyCity": city,
@@ -1917,54 +1970,89 @@ def map_shovels_response_to_record(address_data: dict, permit_data: dict) -> dic
         "ZIP": zip_code,
         "Zip": zip_code,
         
-        # Date fields
+        # ======================================================================
+        # DATE FIELDS
+        # ======================================================================
         "AppliedDate": file_date,
         "ApplicationDate": file_date,
-        "IssuePermitDate": issue_date,  # For Orlando compatibility
+        "IssuePermitDate": issue_date,
         "IssueDate": issue_date,
         "CompletedDate": final_date,
         "FinalDate": final_date,
-        "ExpiresDate": "",
-        "LastUpdated": "",
-        "StatusDate": "",
+        "ExpiresDate": "",  # Not available from Shovels
+        "LastUpdated": "",  # Not available from Shovels
+        "StatusDate": "",   # Not available from Shovels
         
-        # Permit class/type
+        # ======================================================================
+        # PERMIT CLASS/TYPE
+        # ======================================================================
         "PermitClass": permit_type,
         "PermitClassMapped": permit_type,
         "PermitClassification": permit_type,
         
-        # Other fields
-        "Parcel": address_data.get("parcel_id", ""),
-        "ParcelNumber": address_data.get("parcel_id", ""),
-        "PIN": address_data.get("parcel_id", ""),
-        "ProjectName": description,  # For Orlando compatibility
-        "Owner": address_data.get("property_legal_owner", ""),
+        # ======================================================================
+        # PROPERTY INFO (from PERMIT data - this is the key fix!)
+        # ======================================================================
+        "Owner": property_legal_owner,
+        "PropertyOwner": property_legal_owner,
+        "PropertyLegalOwner": property_legal_owner,
+        "PropertyYearBuilt": str(property_year_built) if property_year_built else "",
+        "YearBuilt": str(property_year_built) if property_year_built else "",
+        "PropertyBuildingArea": building_area_formatted,
+        "BuildingArea": building_area_formatted,
+        "PropertyStories": str(property_story_count) if property_story_count else "",
+        "Stories": str(property_story_count) if property_story_count else "",
+        "PropertyAssessedValue": assessed_value_formatted,
+        "AssessedValue": assessed_value_formatted,
+        "PropertyType": property_type_detail or property_type,
+        
+        # ======================================================================
+        # OTHER FIELDS
+        # ======================================================================
+        "Parcel": address_data.get("parcel_id") or "",
+        "ParcelNumber": address_data.get("parcel_id") or "",
+        "PIN": address_data.get("parcel_id") or "",
+        "ProjectName": description,
         "Publisher": "Shovels API",
-        "Link": "",
+        "Link": "",  # No source link from Shovels
         
-        # Job value
-        "JobValue": str(job_value) if job_value else "",
+        # ======================================================================
+        # JOB VALUE AND FEES
+        # ======================================================================
+        "JobValue": job_value_formatted,
+        "Fees": fees_formatted,
         
-        # Tags/categories
-        "Tags": ", ".join(permit_data.get("tags", [])) if permit_data.get("tags") else "",
+        # ======================================================================
+        # TAGS/CATEGORIES
+        # ======================================================================
+        "Tags": ", ".join(permit_data.get("tags") or []),
         
-        # Jurisdiction
-        "Jurisdiction": permit_data.get("jurisdiction", ""),
+        # ======================================================================
+        # JURISDICTION
+        # ======================================================================
+        "Jurisdiction": permit_data.get("jurisdiction") or "",
         
-        # Contractor
-        "ContractorID": permit_data.get("contractor_id", ""),
+        # ======================================================================
+        # CONTRACTOR
+        # ======================================================================
+        "ContractorID": permit_data.get("contractor_id") or "",
         
-        # Property info (if available in address_data)
-        "PropertyYearBuilt": str(address_data.get("property_year_built", "")) if address_data.get("property_year_built") else "",
-        "PropertyBuildingArea": str(address_data.get("property_building_area", "")) if address_data.get("property_building_area") else "",
-        "PropertyLotSize": str(address_data.get("property_lot_size", "")) if address_data.get("property_lot_size") else "",
-        "PropertyType": address_data.get("property_type_detail", ""),
-        "PropertyStories": str(address_data.get("property_story_count", "")) if address_data.get("property_story_count") else "",
-        "PropertyAssessedValue": str(address_data.get("property_assess_market_value", "")) if address_data.get("property_assess_market_value") else "",
+        # ======================================================================
+        # COORDINATES
+        # ======================================================================
+        "Latitude": str(address_data.get("lat")) if address_data.get("lat") else "",
+        "Longitude": str(address_data.get("long")) if address_data.get("long") else "",
         
-        # Coordinates
-        "Latitude": str(address_data.get("lat", "")) if address_data.get("lat") else "",
-        "Longitude": str(address_data.get("long", "")) if address_data.get("long") else "",
+        # ======================================================================
+        # REFERENCE IDs
+        # ======================================================================
+        "GeoID": address_data.get("geo_id") or "",
+        
+        # ======================================================================
+        # SOURCE MARKERS
+        # ======================================================================
+        "table": "shovels_api",
+        "_source_table": "shovels_api",
     }
     
     return record
