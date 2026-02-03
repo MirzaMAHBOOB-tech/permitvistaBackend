@@ -70,6 +70,26 @@ def get_permit_id_from_token(token: str) -> Optional[str]:
             return None
         return data["permit_id"]
 
+def clean_address_for_shovels(address: str) -> str:
+    """
+    Clean address string for Shovels API lookup.
+    Removes commas, "USA", and extra whitespace that Google Autocomplete adds.
+    
+    Example:
+        "100 E Broward Blvd, Fort Lauderdale, FL 33301, USA" 
+        -> "100 E Broward Blvd Fort Lauderdale FL 33301"
+    """
+    if not address:
+        return ""
+    # Remove ", USA" (case insensitive)
+    cleaned = re.sub(r',\s*USA\s*$', '', address, flags=re.IGNORECASE)
+    # Remove all commas
+    cleaned = cleaned.replace(',', '')
+    # Normalize whitespace (multiple spaces to single space)
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    # Strip leading/trailing whitespace
+    return cleaned.strip()
+
 # ----------------- Setup / Logging -----------------
 BASE_DIR = Path(__file__).parent
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -872,16 +892,18 @@ def search_stream(
             # Use Shovels API if configured
             if USE_SHOVELS_API:
                 try:
-                    logging.info("SEARCH-STREAM (Shovels API) | address='%s' dates=%s..%s max=%s", 
-                                input_addr, date_from, date_to, max_results)
+                    # Clean address for Shovels API (remove commas, "USA", etc.)
+                    cleaned_addr = clean_address_for_shovels(input_addr)
+                    logging.info("SEARCH-STREAM (Shovels API) | address='%s' (cleaned: '%s') dates=%s..%s max=%s", 
+                                input_addr, cleaned_addr, date_from, date_to, max_results)
                     
                     # Format date range for Shovels API
                     permit_from = date_from if date_from else "1990-01-01"
                     permit_to = date_to if date_to else date.today().isoformat()
                     
-                    # Call Shovels API
+                    # Call Shovels API with cleaned address
                     address_data, permits_list = get_permits_for_address(
-                        address=input_addr,
+                        address=cleaned_addr,
                         permit_from=permit_from,
                         permit_to=permit_to
                     )
@@ -1149,16 +1171,18 @@ def search(
     # Use Shovels API if configured, otherwise fallback to SQL
     if USE_SHOVELS_API:
         try:
-            logging.info("SEARCH (Shovels API) | address='%s' dates=%s..%s max=%s", 
-                        input_addr, date_from, date_to, max_results)
+            # Clean address for Shovels API (remove commas, "USA", etc.)
+            cleaned_addr = clean_address_for_shovels(input_addr)
+            logging.info("SEARCH (Shovels API) | address='%s' (cleaned: '%s') dates=%s..%s max=%s", 
+                        input_addr, cleaned_addr, date_from, date_to, max_results)
             
             # Format date range for Shovels API
             permit_from = date_from if date_from else "1990-01-01"
             permit_to = date_to if date_to else date.today().isoformat()
             
-            # Call Shovels API
+            # Call Shovels API with cleaned address
             address_data, permits_list = get_permits_for_address(
-                address=input_addr,
+                address=cleaned_addr,
                 permit_from=permit_from,
                 permit_to=permit_to
             )
@@ -1660,8 +1684,12 @@ async def generate_pdf_for_record(request: Request):
                 raise HTTPException(status_code=400, detail="Address required for Shovels API record lookup")
             
             try:
-                # Search address and permits
-                address_data, permits_list = get_permits_for_address(address=address)
+                # Clean address for Shovels API (remove commas, "USA", etc.)
+                cleaned_addr = clean_address_for_shovels(address)
+                logging.info("PDF generation: Using cleaned address '%s' (original: '%s')", cleaned_addr, address)
+                
+                # Search address and permits with cleaned address
+                address_data, permits_list = get_permits_for_address(address=cleaned_addr)
                 if not address_data or not permits_list:
                     raise HTTPException(status_code=404, detail=f"Record not found for permit: {permit_id}")
                 
