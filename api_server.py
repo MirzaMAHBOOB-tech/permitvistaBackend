@@ -1675,6 +1675,7 @@ async def generate_pdf_for_record(request: Request):
         if "record" in request_data and isinstance(request_data["record"], dict):
             record = request_data["record"]
             source_table = record.get("table", "unknown")
+            record["_source_table"] = source_table  # Set for consistency with SQL records
             logging.info("Using provided record data for permit_id=%s from table=%s", permit_id, source_table)
         elif request_data.get("table") == "shovels_api" and USE_SHOVELS_API:
             # Record is from Shovels API - need to re-fetch it
