@@ -2042,7 +2042,7 @@ def map_shovels_response_to_record(address_data: dict, permit_data: dict) -> dic
         "ParcelNumber": address_data.get("parcel_id") or "",
         "PIN": address_data.get("parcel_id") or "",
         "ProjectName": description,
-        "Publisher": "Shovels API",
+        "Publisher": "PermitVista",
         "Link": "",  # No source link from Shovels
         
         # ======================================================================
@@ -2264,8 +2264,8 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
                                      "CurrentStatusDate", "StatusUpdateDate")
         logging.info("Status date: '%s'", status_date or "EMPTY")
 
-        # Publisher - try multiple variations
-        publisher = get_field_value(record, "Publisher", "Source", "DataSource", "Origin")
+        # Publisher - always use PermitVista (Shovels is our data source, not customer-facing)
+        publisher = "PermitVista"
 
         # ensure 'other' exists so templates referencing other.* don't break
         ctx = {

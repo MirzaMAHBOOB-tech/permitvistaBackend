@@ -270,7 +270,7 @@
     <!-- FOOTER (screen + print fixed) -->
     <div class="certificate-footer" style="width:100%; max-width:8.5in; margin-top: 60px; box-sizing:border-box; padding:0 0.2in; font-size:0.75rem; color:#6b7280;">
       <p style="border-top:1px solid #e6e9ec; padding-top:10px; margin:0; text-align:center;">
-        This is a digital certificate bearing the authority of the City of Tampa. Powered by PermitVista Certificate System.
+        This is a digital certificate bearing the authority of the City of {% if property.city %}{{ property.city }}{% else %}Unknown{% endif %}. Powered by PermitVista Certificate System.
       </p>
     </div>
 
