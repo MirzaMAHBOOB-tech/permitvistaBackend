@@ -85,15 +85,17 @@ def search_address(address: str) -> Optional[Dict]:
 
 def search_permits(geo_id: str, permit_from: Optional[str] = None, permit_to: Optional[str] = None) -> List[Dict]:
     """
-    Step 2: Search for permits using geo_id
+    Step 2: Search for permits using geo_id with cursor-based pagination
+    
+    Fetches ALL permits by looping through all pages until next_cursor is null.
     
     Args:
         geo_id: Address geo_id from Step 1
-        permit_from: Start date (YYYY-MM-DD). Default: 1990-01-01
-        permit_to: End date (YYYY-MM-DD). Default: today
+        permit_from: Start date (YYYY-MM-DD). Default: 1990-01-01 (for client-side filtering)
+        permit_to: End date (YYYY-MM-DD). Default: today (for client-side filtering)
     
     Returns:
-        List of permit records
+        List of all permit records (all pages combined)
     
     Raises:
         ShovelsAPIError: If API call fails
@@ -101,33 +103,103 @@ def search_permits(geo_id: str, permit_from: Optional[str] = None, permit_to: Op
     if not geo_id:
         raise ShovelsAPIError("geo_id parameter is required")
     
-    # Default date range: 1990-01-01 to today
+    # Default date range: 1990-01-01 to today (used for client-side filtering after fetch)
     if not permit_from:
         permit_from = "1990-01-01"
     if not permit_to:
         permit_to = date.today().isoformat()
     
     try:
-        url = f"{SHOVELS_BASE_URL}/permits/search"
-        headers = get_shovels_headers()
-        params = {
-            "geo_id": geo_id,
-            "permit_from": permit_from,
-            "permit_to": permit_to
-        }
+        all_permits = []
+        cursor = None
+        page_num = 1
+        max_page_size = 500  # Maximum allowed by Shovels API
         
-        logger.info("Shovels API: Searching permits for geo_id=%s, dates=%s to %s", 
+        logger.info("Shovels API: Searching permits for geo_id=%s (with pagination), date filter: %s to %s", 
                    geo_id, permit_from, permit_to)
         
-        response = requests.get(url, headers=headers, params=params, timeout=SHOVELS_TIMEOUT)
-        response.raise_for_status()
+        while True:
+            # Use /addresses/{geo_id}/permits endpoint with pagination
+            url = f"{SHOVELS_BASE_URL}/addresses/{geo_id}/permits"
+            headers = get_shovels_headers()
+            params = {"page_size": max_page_size}
+            
+            if cursor:
+                params["cursor"] = cursor
+            
+            response = requests.get(url, headers=headers, params=params, timeout=SHOVELS_TIMEOUT)
+            response.raise_for_status()
+            
+            data = response.json()
+            page_items = data.get("items", [])
+            all_permits.extend(page_items)
+            
+            page_size = data.get("size", len(page_items))
+            next_cursor = data.get("next_cursor")
+            
+            logger.info("Shovels API: Page %d - fetched %d permits (total so far: %d), next_cursor: %s", 
+                       page_num, page_size, len(all_permits), "present" if next_cursor else "null")
+            
+            # Break if no more pages
+            if not next_cursor:
+                break
+            
+            cursor = next_cursor
+            page_num += 1
         
-        data = response.json()
-        permits = data.get("items", [])
+        logger.info("Shovels API: Completed pagination - found %d total permits for geo_id=%s", 
+                   len(all_permits), geo_id)
         
-        logger.info("Shovels API: Found %d permits for geo_id=%s", len(permits), geo_id)
+        # Apply date filtering client-side if dates were specified
+        if permit_from != "1990-01-01" or permit_to != date.today().isoformat():
+            filtered_permits = []
+            permit_from_date = datetime.strptime(permit_from, "%Y-%m-%d").date()
+            permit_to_date = datetime.strptime(permit_to, "%Y-%m-%d").date()
+            
+            for permit in all_permits:
+                # Try to get permit date from various fields
+                permit_date_str = (permit.get("permit_date") or 
+                                 permit.get("issue_date") or 
+                                 permit.get("applied_date") or 
+                                 permit.get("date"))
+                
+                if permit_date_str:
+                    permit_date = None
+                    try:
+                        # Try parsing different date formats
+                        if isinstance(permit_date_str, str):
+                            # Try ISO format first
+                            try:
+                                permit_date = datetime.fromisoformat(permit_date_str.replace('Z', '+00:00')).date()
+                            except:
+                                # Try other common formats
+                                for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"]:
+                                    try:
+                                        permit_date = datetime.strptime(permit_date_str[:10], fmt).date()
+                                        break
+                                    except:
+                                        continue
+                        
+                        # If we successfully parsed a date, check if it's within range
+                        if permit_date:
+                            if permit_from_date <= permit_date <= permit_to_date:
+                                filtered_permits.append(permit)
+                        else:
+                            # Include permit if date parsing fails (better to show than hide)
+                            filtered_permits.append(permit)
+                    except Exception as e:
+                        logger.debug("Could not parse permit date '%s': %s", permit_date_str, e)
+                        # Include permit if date parsing fails (better to show than hide)
+                        filtered_permits.append(permit)
+                else:
+                    # Include permit if no date available (better to show than hide)
+                    filtered_permits.append(permit)
+            
+            logger.info("Shovels API: Date filter applied - %d permits match date range %s to %s", 
+                       len(filtered_permits), permit_from, permit_to)
+            return filtered_permits
         
-        return permits
+        return all_permits
         
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
