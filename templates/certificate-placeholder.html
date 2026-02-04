@@ -99,6 +99,12 @@
               <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">Property Address</td>
               <td style="padding:6px 10px; font-size:14px; font-weight:500;">{{ property.address }}</td>
             </tr>
+            {% if property.unit_number %}
+            <tr style="border-top:1px solid #e6e9ec;">
+              <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">Unit #</td>
+              <td style="padding:6px 10px; font-size:14px; font-weight:600;">{{ property.unit_number }}</td>
+            </tr>
+            {% endif %}
             <tr style="border-top:1px solid #e6e9ec;">
               <td style="background:#f3f4f6; padding:6px 10px; font-weight:600; font-size:14px;">City</td>
               <td style="padding:6px 10px; font-size:14px;">{{ property.city }}</td>
@@ -261,6 +267,12 @@
           </tbody>
         </table>
       </div>
+
+      {% if other.unit_filter_note %}
+      <div style="margin-top:6px; padding:10px 12px; border:1px dashed #9ca3af; border-radius:8px; background:#f9fafb; color:#374151; font-size:13px; line-height:1.4;">
+        <strong>Note:</strong> {{ other.unit_filter_note }}
+      </div>
+      {% endif %}
 
     </div> <!-- /columns wrapper -->
 

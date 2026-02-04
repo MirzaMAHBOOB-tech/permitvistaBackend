@@ -1671,11 +1671,15 @@ async def generate_pdf_for_record(request: Request):
         if not permit_id:
             raise HTTPException(status_code=400, detail="record_id or permit_number required")
 
+        unit_number = (request_data.get("unit_number") or "").strip()
+
         # Check if full record data is provided (from Shovels API or frontend)
         if "record" in request_data and isinstance(request_data["record"], dict):
             record = request_data["record"]
             source_table = record.get("table", "unknown")
             record["_source_table"] = source_table  # Set for consistency with SQL records
+            if unit_number:
+                record["_unit_number"] = unit_number
             logging.info("Using provided record data for permit_id=%s from table=%s", permit_id, source_table)
         elif request_data.get("table") == "shovels_api" and USE_SHOVELS_API:
             # Record is from Shovels API - need to re-fetch it
@@ -1707,6 +1711,8 @@ async def generate_pdf_for_record(request: Request):
                 # Map to record format
                 record = map_shovels_response_to_record(address_data, permit_data)
                 source_table = "shovels_api"
+                if unit_number:
+                    record["_unit_number"] = unit_number
                 logging.info("Fetched record from Shovels API for permit_id=%s", permit_id)
             except ShovelsAPIError as e:
                 logging.error("Shovels API error in generate-pdf: %s", str(e))
@@ -2197,6 +2203,14 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
                                "Address", "StreetAddress", "PropertyAddress", "SearchAddress")
         addr2 = get_field_value(record, "OriginalAddress2", "Address2")
         property_address = (addr1 + " " + addr2).strip() if addr2 else addr1
+
+        # Unit number (optional) - used for condo/apartment filtering context
+        unit_number = get_field_value(record, "_unit_number", "UnitNumber", "unit_number", "Unit", "unit")
+        if unit_number:
+            # Append unit to address if not already present
+            unit_token = f"unit {unit_number}".lower()
+            if property_address and unit_token not in property_address.lower():
+                property_address = f"{property_address} Unit {unit_number}".strip()
         
         logging.info("Address parsing: addr1='%s', addr2='%s', property_address='%s'", 
                     addr1[:100] if addr1 else "EMPTY", addr2[:50] if addr2 else "EMPTY", 
@@ -2205,6 +2219,10 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
         # Address description - try multiple variations
         address_description = get_field_value(record, "AddressDescription", "PermitAddress", 
                                              "SearchAddress", "OriginalAddress1", "Address")
+        if unit_number and address_description:
+            unit_token = f"unit {unit_number}".lower()
+            if unit_token not in address_description.lower():
+                address_description = f"{address_description} Unit {unit_number}".strip()
 
         # Parse address components once if address exists
         parsed_city = ""
@@ -2290,6 +2308,7 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
             "property": {
                 "address_description": address_description,
                 "address": property_address,
+                "unit_number": unit_number,
                 "city": city,
                 "state": state,
                 "zip_code": zip_code,
@@ -2301,7 +2320,9 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
             "current_status": get_field_value(record, "StatusCurrentMapped", "CurrentStatusMapped", "StatusMapped", "ApplicationStatus", "Status"),
             "other": {
                 "online_record_url": get_field_value(record, "Link", "URL", "OnlineLink", "RecordURL"),
-                "publisher": publisher
+                "publisher": publisher,
+                "unit_filter_note": (f"This certificate shows permits for Unit {unit_number} only. "
+                                     f"Building-wide permits are available upon request.") if unit_number else ""
             },
             # Orlando: ProjectName → Work Description
             "work_description": get_field_value(record, "Description", "WorkDescription", "Desc1-Desc10", "Work_Description", "WorkType", "ProjectDesc"),
