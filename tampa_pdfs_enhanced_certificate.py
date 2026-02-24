@@ -18,6 +18,7 @@ from io import BytesIO
 from pathlib import Path
 import time
 from dotenv import load_dotenv
+from permit_portals import get_permit_portal_url
 import pandas as pd
 from slugify import slugify
 from jinja2 import Template
@@ -255,8 +256,15 @@ def render_enhanced_certificate_pdf_bytes(record: dict, id_col: str, all_fields:
         "status_current": record.get("StatusCurrentMapped", "") or record.get("CurrentStatus", "") or record.get("PermitStatus", ""),
         "current_status": record.get("CurrentStatus", "") or record.get("StatusCurrentMapped", "") or record.get("PermitStatus", ""),
         "other": {
-            "online_record_url": record.get("Link", "") or record.get("OnlineRecord", "") or "https://aca.tampagov.net/citizenaccess/",
-            "publisher": record.get("Publisher", "TAMPA"),
+            "online_record_url": (
+                record.get("Link", "") or record.get("OnlineRecord", "")
+                or get_permit_portal_url(
+                    record.get("Jurisdiction", "") or record.get("OriginalCity", "") or "TAMPA",
+                    record.get("PermitNum", "") or record.get("PermitNumber", "")
+                )
+                or ""
+            ),
+            "publisher": record.get("Publisher", "PermitVista"),
         },
         "work_description": record.get("WorkDescription", "") or record.get("ProjectDescription", "") or record.get("Description", ""),
         "map_image_url": generate_map_placeholder_url(),

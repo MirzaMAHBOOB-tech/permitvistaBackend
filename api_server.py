@@ -33,6 +33,9 @@ from contextlib import contextmanager
 # ----------------- Shovels API Import -----------------
 from shovels_api import get_permits_for_address, ShovelsAPIError
 
+# ----------------- Permit Portal URLs -----------------
+from permit_portals import get_permit_portal_url
+
 # ----------------- Token Management for Privacy -----------------
 # Store token -> permit_id mapping (with expiration)
 _token_store: dict[str, dict] = {}  # token -> {"permit_id": str, "expires_at": datetime}
@@ -2319,7 +2322,14 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
             "status_current": get_field_value(record, "Status", "StatusCurrent", "CurrentStatus", "ApplicationStatus"),
             "current_status": get_field_value(record, "StatusCurrentMapped", "CurrentStatusMapped", "StatusMapped", "ApplicationStatus", "Status"),
             "other": {
-                "online_record_url": get_field_value(record, "Link", "URL", "OnlineLink", "RecordURL"),
+                "online_record_url": (
+                    get_field_value(record, "Link", "URL", "OnlineLink", "RecordURL")
+                    or get_permit_portal_url(
+                        get_field_value(record, "Jurisdiction", "jurisdiction") or city,
+                        get_field_value(record, "PermitNum", "PermitNumber", "PermitID", "Permit_Number", "Permit")
+                    )
+                    or ""
+                ),
                 "publisher": publisher,
                 "unit_filter_note": (f"This certificate shows permits for Unit {unit_number} only. "
                                      f"Building-wide permits are available upon request.") if unit_number else ""

@@ -547,12 +547,16 @@
                                     <tr>
                                         <td class="status-label">Online Record</td>
                                         <td class="status-value">
-                                            <a href="https://aca.tampagov.net/citizenaccess/" class="text-blue-600 underline" target="_blank">Click here</a>
+                                            {% if other.online_record_url %}
+                                            <a href="{{ other.online_record_url }}" class="text-blue-600 underline" target="_blank">Click here</a>
+                                            {% else %}
+                                            <span style="color:#6b7280;">Contact city building department</span>
+                                            {% endif %}
                                         </td>
                                     </tr>
                                     <tr>
                                         <td class="status-label">Publisher</td>
-                                        <td class="status-value">TAMPA</td>
+                                        <td class="status-value">{{ other.publisher }}</td>
                                     </tr>
                                 </table>
                             </td>

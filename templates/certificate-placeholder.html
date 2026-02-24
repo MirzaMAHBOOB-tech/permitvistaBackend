@@ -231,10 +231,17 @@
             </tr>
           </thead>
           <tbody>
+            {% if other.online_record_url %}
             <tr style="border-bottom:1px solid #e6e9ec;">
               <td style="width:50%; background:#f7fafc; border-right:1px solid #4b5563; padding:10px 10px; font-weight:600; font-size:14px;">Online Record</td>
               <td style="padding:10px 10px; font-size:14px;"><a href="{{ other.online_record_url }}" style="color:#2563eb; text-decoration:underline;" target="_blank">Click here</a></td>
             </tr>
+            {% else %}
+            <tr style="border-bottom:1px solid #e6e9ec;">
+              <td style="width:50%; background:#f7fafc; border-right:1px solid #4b5563; padding:10px 10px; font-weight:600; font-size:14px;">Online Record</td>
+              <td style="padding:10px 10px; font-size:14px; color:#6b7280;">Contact city building department</td>
+            </tr>
+            {% endif %}
             <tr>
               <td style="background:#f7fafc; border-right:1px solid #4b5563; padding:10px 10px; font-weight:600; font-size:14px;">Publisher</td>
               <td style="padding:10px 10px; font-size:14px;">{{ other.publisher }}</td>
