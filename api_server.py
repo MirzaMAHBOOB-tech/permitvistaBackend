@@ -2325,8 +2325,7 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
                 "online_record_url": (
                     get_field_value(record, "Link", "URL", "OnlineLink", "RecordURL")
                     or get_permit_portal_url(
-                        get_field_value(record, "Jurisdiction", "jurisdiction") or city,
-                        get_field_value(record, "PermitNum", "PermitNumber", "PermitID", "Permit_Number", "Permit")
+                        get_field_value(record, "Jurisdiction", "jurisdiction") or city
                     )
                     or ""
                 ),

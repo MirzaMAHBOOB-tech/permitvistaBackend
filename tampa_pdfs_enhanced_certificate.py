@@ -259,8 +259,7 @@ def render_enhanced_certificate_pdf_bytes(record: dict, id_col: str, all_fields:
             "online_record_url": (
                 record.get("Link", "") or record.get("OnlineRecord", "")
                 or get_permit_portal_url(
-                    record.get("Jurisdiction", "") or record.get("OriginalCity", "") or "TAMPA",
-                    record.get("PermitNum", "") or record.get("PermitNumber", "")
+                    record.get("Jurisdiction", "") or record.get("OriginalCity", "") or "TAMPA"
                 )
                 or ""
             ),
