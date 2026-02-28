@@ -36,6 +36,13 @@ from shovels_api import get_permits_for_address, ShovelsAPIError
 # ----------------- Permit Portal URLs -----------------
 from permit_portals import get_permit_portal_url
 
+# ----------------- Stripe Payment -----------------
+from stripe_payment import (
+    init_stripe, is_stripe_enabled, create_checkout_session,
+    verify_payment, get_pricing_tiers, PRICING_TIERS
+)
+import stripe as stripe_module
+
 # ----------------- Token Management for Privacy -----------------
 # Store token -> permit_id mapping (with expiration)
 _token_store: dict[str, dict] = {}  # token -> {"permit_id": str, "expires_at": datetime}
@@ -130,6 +137,12 @@ DB_SERVER = os.getenv("DB_SERVER", "permitvista-db.database.windows.net")
 DB_DATABASE = os.getenv("DB_DATABASE", "free-sql-db-7590410")
 DB_USER = os.getenv("DB_USER", "permitvistaadmin")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+
+# ----------------- Stripe Configuration -----------------
+STRIPE_ENABLED = init_stripe()
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://permitvistafrontend.onrender.com")
+BACKEND_URL = os.getenv("BACKEND_URL", "https://permitvistabackend.onrender.com")
 
 # ----------------- FastAPI app -----------------
 app = FastAPI(title="Permit Certificates", docs_url=None, redoc_url=None)
@@ -1798,6 +1811,169 @@ async def generate_pdf_for_record(request: Request):
     except Exception as e:
         logging.exception("PDF generation error: %s", e)
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+
+
+# ==================== STRIPE PAYMENT ENDPOINTS ====================
+
+@app.get("/pricing")
+async def get_pricing():
+    """Return available pricing tiers for frontend display."""
+    return JSONResponse({
+        "stripe_enabled": STRIPE_ENABLED,
+        "tiers": get_pricing_tiers(),
+    })
+
+
+@app.post("/create-checkout-session")
+async def create_checkout(request: Request):
+    """
+    Create a Stripe Checkout session.
+    Frontend sends: { record_data, pricing_tier, unit_number }
+    Returns: { checkout_url } for redirect.
+    """
+    if not STRIPE_ENABLED:
+        raise HTTPException(status_code=503, detail="Payment system not configured")
+
+    try:
+        data = await request.json()
+        record_data = data.get("record_data")
+        pricing_tier = data.get("pricing_tier", "standard")
+        unit_number = (data.get("unit_number") or "").strip()
+
+        if not record_data:
+            raise HTTPException(status_code=400, detail="record_data is required")
+
+        if pricing_tier not in PRICING_TIERS:
+            raise HTTPException(status_code=400, detail=f"Invalid pricing_tier. Valid: {list(PRICING_TIERS.keys())}")
+
+        result = create_checkout_session(
+            record_data=record_data,
+            pricing_tier=pricing_tier,
+            unit_number=unit_number,
+            success_base_url=f"{BACKEND_URL}/payment-success",
+            cancel_url=f"{FRONTEND_URL}/?payment=cancelled",
+        )
+
+        return JSONResponse(result)
+
+    except stripe_module.error.StripeError as e:
+        logging.exception("Stripe error creating checkout session: %s", e)
+        raise HTTPException(status_code=500, detail=f"Payment error: {str(e)}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/payment-success")
+async def payment_success(session_id: str = Query(...)):
+    """
+    Stripe redirects here after successful payment.
+    Verifies payment, generates PDF, redirects to PDF viewer.
+    """
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+
+    logging.info("Payment success callback for session_id=%s", session_id)
+
+    session_data = verify_payment(session_id)
+    if not session_data:
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(
+            content="""
+            <html><body style="font-family:Inter,sans-serif;text-align:center;padding:60px;">
+            <h2 style="color:#dc2626;">Payment Verification Failed</h2>
+            <p>Your payment could not be verified, or the session has expired.</p>
+            <p>If you were charged, please contact support with your session ID.</p>
+            <p style="color:#6b7280;font-size:13px;">Session: {}</p>
+            <a href="{}" style="color:#2563eb;">Return to PermitVista</a>
+            </body></html>
+            """.format(session_id, FRONTEND_URL),
+            status_code=400,
+        )
+
+    record = session_data["record"]
+    unit_number = session_data.get("unit_number", "")
+    if unit_number:
+        record["_unit_number"] = unit_number
+
+    try:
+        pdf_path = generate_pdf_from_template(record, str(TEMPLATES_DIR / "certificate-placeholder.html"))
+        rec_id = pick_id_from_record(record)
+        token = create_token_for_permit(rec_id)
+        view_url = f"{BACKEND_URL}/view/{token}"
+
+        logging.info("Payment success: PDF generated for session=%s, permit=%s", session_id, rec_id)
+
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(content=f"""
+        <html>
+        <head><meta http-equiv="refresh" content="2;url={view_url}">
+        <style>
+            body {{ font-family: 'Inter', sans-serif; text-align: center; padding: 60px; background: #f5f7fa; }}
+            .card {{ background: #fff; max-width: 480px; margin: 0 auto; padding: 40px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }}
+            h2 {{ color: #059669; margin-bottom: 12px; }}
+            p {{ color: #374151; font-size: 15px; }}
+            a {{ color: #2563eb; font-weight: 600; }}
+            .spinner {{ width: 40px; height: 40px; border: 4px solid #e5e7eb; border-top-color: #2563eb; border-radius: 50%; animation: spin 1s linear infinite; margin: 20px auto; }}
+            @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+        </style>
+        </head>
+        <body>
+            <div class="card">
+                <h2>Payment Successful!</h2>
+                <div class="spinner"></div>
+                <p>Your permit certificate is ready. Redirecting...</p>
+                <p><a href="{view_url}">Click here if not redirected</a></p>
+            </div>
+        </body>
+        </html>
+        """)
+
+    except Exception as e:
+        logging.exception("PDF generation failed after payment for session=%s: %s", session_id, e)
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(
+            content=f"""
+            <html><body style="font-family:Inter,sans-serif;text-align:center;padding:60px;">
+            <h2 style="color:#dc2626;">PDF Generation Error</h2>
+            <p>Payment was successful but PDF generation failed.</p>
+            <p>Please contact support. Session: {session_id}</p>
+            <a href="{FRONTEND_URL}" style="color:#2563eb;">Return to PermitVista</a>
+            </body></html>
+            """,
+            status_code=500,
+        )
+
+
+@app.post("/stripe-webhook")
+async def stripe_webhook(request: Request):
+    """
+    Stripe webhook for payment event verification (backup).
+    Configure in Stripe Dashboard -> Webhooks -> endpoint URL: /stripe-webhook
+    """
+    if not STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="Webhook not configured")
+
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+
+    try:
+        event = stripe_module.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe_module.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        logging.info("Webhook: checkout.session.completed for %s (payment=%s)",
+                     session["id"], session.get("payment_status"))
+
+    return JSONResponse({"status": "ok"})
+
+
+# ==================== END STRIPE ENDPOINTS ====================
 
 @app.get("/record")
 def get_record(permit_id: str = Query(...)):

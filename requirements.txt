@@ -9,3 +9,4 @@ azure-storage-blob
 python-multipart
 pyodbc
 requests
+stripe
