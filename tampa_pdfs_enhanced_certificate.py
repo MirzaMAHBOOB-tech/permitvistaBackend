@@ -37,6 +37,7 @@ END_YEAR = int(os.getenv("END_YEAR", "2023"))
 LOCAL_OUT_ROOT = os.getenv("LOCAL_OUT_ROOT", "enhanced_certificates_debug")
 MAX_CSV_FILES = int(os.getenv("MAX_CSV_FILES", "5"))
 WKHTMLTOPDF_PATH = os.getenv("WKHTMLTOPDF_PATH", None)
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
 # New control flags
 USE_WEASYPRINT = os.getenv("USE_WEASYPRINT", "auto").lower()  # 'auto'|'true'|'false'
@@ -157,7 +158,17 @@ def format_timestamp(s):
     except Exception:
         return s
 
-def generate_map_placeholder_url():
+def generate_map_placeholder_url(record: dict = None):
+    """Return Google Static Maps satellite URL if lat/long available, else local fallback."""
+    if record:
+        lat = record.get("Latitude", "") or record.get("lat", "")
+        lng = record.get("Longitude", "") or record.get("long", "")
+        if lat and lng and GOOGLE_MAPS_API_KEY:
+            return (
+                f"https://maps.googleapis.com/maps/api/staticmap"
+                f"?center={lat},{lng}&zoom=18&size=400x300"
+                f"&maptype=satellite&key={GOOGLE_MAPS_API_KEY}"
+            )
     return os.path.join(SCRIPT_DIR, "Medias", "map.png")
 
 def _embed_image_as_data_uri(path, default_url=None):
@@ -266,7 +277,7 @@ def render_enhanced_certificate_pdf_bytes(record: dict, id_col: str, all_fields:
             "publisher": record.get("Publisher", "PermitVista"),
         },
         "work_description": record.get("WorkDescription", "") or record.get("ProjectDescription", "") or record.get("Description", ""),
-        "map_image_url": generate_map_placeholder_url(),
+        "map_image_url": generate_map_placeholder_url(record),
         # both forms provided for templates that expect data URI or plain base64
         "logo_image_url": logo_data_uri,
         "logo_base64": logo_base64,

@@ -132,6 +132,9 @@ MAX_CSV_FILES = int(os.getenv("MAX_CSV_FILES", "100"))
 SHOVELS_API_KEY = os.getenv("SHOVELS_API_KEY", "")
 USE_SHOVELS_API = bool(SHOVELS_API_KEY)  # Use Shovels API if key is provided, else fallback to SQL
 
+# ----------------- Google Maps Configuration -----------------
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
+
 # ----------------- Database Configuration -----------------
 DB_SERVER = os.getenv("DB_SERVER", "permitvista-db.database.windows.net")
 DB_DATABASE = os.getenv("DB_DATABASE", "free-sql-db-7590410")
@@ -2358,6 +2361,20 @@ def parse_address_components(address: str) -> Tuple[str, str, str]:
     return city, state, zip_code
 
 
+def _build_map_image_url(record: dict) -> str:
+    """Build a Google Static Maps satellite URL from record lat/long, fallback to local map.png."""
+    lat = record.get("Latitude", "")
+    lng = record.get("Longitude", "")
+    if lat and lng and GOOGLE_MAPS_API_KEY:
+        return (
+            f"https://maps.googleapis.com/maps/api/staticmap"
+            f"?center={lat},{lng}&zoom=18&size=400x300"
+            f"&maptype=satellite&key={GOOGLE_MAPS_API_KEY}"
+        )
+    fallback = BASE_DIR / "Medias" / "map.png"
+    return str(fallback.as_uri()) if fallback.exists() else ""
+
+
 def generate_pdf_from_template(record: dict, template_path: str) -> str:
     tmpdir = tempfile.gettempdir()
     permit_id = pick_id_from_record(record)
@@ -2512,7 +2529,7 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
             # Orlando: ProjectName → Work Description
             "work_description": get_field_value(record, "Description", "WorkDescription", "Desc1-Desc10", "Work_Description", "WorkType", "ProjectDesc"),
             "logo_image_url": str((BASE_DIR / "Medias" / "badge.png").as_uri()) if (BASE_DIR / "Medias" / "badge.png").exists() else "",
-            "map_image_url": str((BASE_DIR / "Medias" / "map.png").as_uri()) if (BASE_DIR / "Medias" / "map.png").exists() else "",
+            "map_image_url": _build_map_image_url(record),
             "generated_on_date": datetime.now().strftime("%m/%d/%Y"),
             "record": record
         }
