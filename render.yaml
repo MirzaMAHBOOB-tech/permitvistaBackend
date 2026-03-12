@@ -4,6 +4,23 @@ services:
     env: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
+    envVars:
+      - key: ENVIRONMENT
+        value: staging
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: SENDGRID_FROM_EMAIL
+        value: noreply@permitvista.com
+      - key: FRONTEND_URL
+        value: https://permitvistafrontend.onrender.com
+      - key: BACKEND_URL
+        value: https://permitvistabackend.onrender.com
     # Render will use Dockerfile automatically when env: docker is set
     # Or if Dockerfile is detected in root, Render will use it automatically
 

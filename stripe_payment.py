@@ -1,7 +1,4 @@
-"""
-Stripe Payment Integration for PermitVista
-Handles checkout session creation, payment verification, and temporary record storage.
-"""
+"""Stripe helpers for PermitVista checkout and payment verification."""
 
 import os
 import time
@@ -9,22 +6,21 @@ import logging
 import threading
 import stripe
 
-# Pricing tiers (amounts in cents)
+PERMIT_CERTIFICATE_PRICE_CENTS = 299
+UNLIMITED_SUBSCRIPTION_PRICE_CENTS = 2999
+
 PRICING_TIERS = {
-    "standard": {
-        "name": "Standard Permit Certificate",
-        "amount": 7500,       # $75.00
-        "description": "Official building permit certificate",
+    "permit_certificate": {
+        "name": "Permit Certificate",
+        "amount": PERMIT_CERTIFICATE_PRICE_CENTS,
+        "description": "One-time permit certificate download",
+        "type": "one-time",
     },
-    "rush": {
-        "name": "Rush Permit Certificate (Same Day)",
-        "amount": 12500,      # $125.00
-        "description": "Priority same-day permit certificate",
-    },
-    "premium": {
-        "name": "Premium Commercial Certificate",
-        "amount": 15000,      # $150.00
-        "description": "Commercial property permit certificate with full detail",
+    "permitvista_unlimited": {
+        "name": "PermitVista Unlimited",
+        "amount": UNLIMITED_SUBSCRIPTION_PRICE_CENTS,
+        "description": "Unlimited monthly certificate downloads",
+        "type": "subscription",
     },
 }
 
@@ -41,7 +37,7 @@ def init_stripe():
     if not stripe.api_key:
         logging.warning("STRIPE_SECRET_KEY not set — payment features disabled")
         return False
-    logging.info("Stripe initialized (key starts with %s...)", stripe.api_key[:12])
+    logging.info("Stripe initialized")
     return True
 
 
@@ -85,7 +81,7 @@ def _cleanup_expired_sessions():
 
 def create_checkout_session(
     record_data: dict,
-    pricing_tier: str,
+    address: str,
     unit_number: str,
     success_base_url: str,
     cancel_url: str,
@@ -99,20 +95,16 @@ def create_checkout_session(
         ValueError for invalid tier
         stripe.error.StripeError for Stripe API issues
     """
-    tier = PRICING_TIERS.get(pricing_tier)
-    if not tier:
-        raise ValueError(f"Invalid pricing tier: {pricing_tier}. Valid: {list(PRICING_TIERS.keys())}")
-
     session = stripe.checkout.Session.create(
         payment_method_types=["card"],
         line_items=[{
             "price_data": {
                 "currency": "usd",
                 "product_data": {
-                    "name": tier["name"],
-                    "description": tier["description"],
+                    "name": PRICING_TIERS["permit_certificate"]["name"],
+                    "description": address or PRICING_TIERS["permit_certificate"]["description"],
                 },
-                "unit_amount": tier["amount"],
+                "unit_amount": PERMIT_CERTIFICATE_PRICE_CENTS,
             },
             "quantity": 1,
         }],
@@ -121,8 +113,8 @@ def create_checkout_session(
         cancel_url=cancel_url,
     )
 
-    store_pending_session(session.id, record_data, pricing_tier, unit_number)
-    logging.info("Created Stripe checkout session %s for tier=%s", session.id, pricing_tier)
+    store_pending_session(session.id, record_data, "permit_certificate", unit_number)
+    logging.info("Created Stripe one-time checkout session %s", session.id)
 
     return {
         "checkout_url": session.url,

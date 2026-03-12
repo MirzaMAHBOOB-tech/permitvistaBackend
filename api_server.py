@@ -24,6 +24,8 @@ import secrets
 import json
 from collections import defaultdict
 from datetime import datetime, timedelta, date
+from urllib.parse import quote_plus
+import base64
 
 # ----------------- Database Import -----------------
 import pyodbc
@@ -39,7 +41,8 @@ from permit_portals import get_permit_portal_url
 # ----------------- Stripe Payment -----------------
 from stripe_payment import (
     init_stripe, is_stripe_enabled, create_checkout_session,
-    verify_payment, get_pricing_tiers, PRICING_TIERS
+    verify_payment, get_pricing_tiers,
+    PERMIT_CERTIFICATE_PRICE_CENTS, UNLIMITED_SUBSCRIPTION_PRICE_CENTS,
 )
 import stripe as stripe_module
 
@@ -143,9 +146,13 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
 # ----------------- Stripe Configuration -----------------
 STRIPE_ENABLED = init_stripe()
+STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://permitvistafrontend.onrender.com")
 BACKEND_URL = os.getenv("BACKEND_URL", "https://permitvistabackend.onrender.com")
+ENVIRONMENT = os.getenv("ENVIRONMENT", "staging").strip().lower()
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
+SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL", "noreply@permitvista.com")
 
 # ----------------- FastAPI app -----------------
 app = FastAPI(title="Permit Certificates", docs_url=None, redoc_url=None)
@@ -343,6 +350,217 @@ def get_table_name(city: Optional[str]) -> List[str]:
     else:
         # If no city specified, search all tables
         return ["dbo.permits", "dbo.miami_permits", "dbo.orlando_permits"]
+
+
+# ----------------- Subscription/User helpers -----------------
+SUBSCRIPTION_ACTIVE_STATUSES = {"active", "trialing"}
+
+
+def ensure_users_table():
+    """Create users table for subscription tracking if it doesn't exist."""
+    create_sql = """
+    IF NOT EXISTS (
+        SELECT * FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'users'
+    )
+    BEGIN
+        CREATE TABLE dbo.users (
+            id INT IDENTITY(1,1) PRIMARY KEY,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            stripe_customer_id VARCHAR(255) NULL,
+            subscription_status VARCHAR(50) NULL,
+            subscription_end_date DATETIME2 NULL,
+            created_at DATETIME2 DEFAULT SYSUTCDATETIME()
+        )
+    END
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(create_sql)
+        conn.commit()
+        cursor.close()
+
+
+def upsert_user_subscription(
+    email: str,
+    stripe_customer_id: Optional[str] = None,
+    subscription_status: Optional[str] = None,
+    subscription_end_date: Optional[datetime] = None,
+):
+    ensure_users_table()
+    sql = """
+    MERGE dbo.users AS target
+    USING (SELECT ? AS email) AS source
+    ON LOWER(target.email) = LOWER(source.email)
+    WHEN MATCHED THEN
+        UPDATE SET
+            stripe_customer_id = COALESCE(?, target.stripe_customer_id),
+            subscription_status = COALESCE(?, target.subscription_status),
+            subscription_end_date = COALESCE(?, target.subscription_end_date)
+    WHEN NOT MATCHED THEN
+        INSERT (email, stripe_customer_id, subscription_status, subscription_end_date)
+        VALUES (?, ?, ?, ?);
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            sql,
+            (
+                email,
+                stripe_customer_id,
+                subscription_status,
+                subscription_end_date,
+                email,
+                stripe_customer_id,
+                subscription_status,
+                subscription_end_date,
+            ),
+        )
+        conn.commit()
+        cursor.close()
+
+
+def update_user_subscription_by_customer(
+    stripe_customer_id: str,
+    subscription_status: str,
+    subscription_end_date: Optional[datetime],
+) -> int:
+    ensure_users_table()
+    sql = """
+    UPDATE dbo.users
+    SET subscription_status = ?, subscription_end_date = ?
+    WHERE stripe_customer_id = ?
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, (subscription_status, subscription_end_date, stripe_customer_id))
+        affected = cursor.rowcount or 0
+        conn.commit()
+        cursor.close()
+    return affected
+
+
+def get_user_by_email(email: str) -> Optional[dict]:
+    ensure_users_table()
+    sql = """
+    SELECT TOP 1 id, email, stripe_customer_id, subscription_status, subscription_end_date, created_at
+    FROM dbo.users
+    WHERE LOWER(email) = LOWER(?)
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, (email,))
+        row = cursor.fetchone()
+        cursor.close()
+
+    if not row:
+        return None
+
+    return {
+        "id": row[0],
+        "email": row[1],
+        "stripe_customer_id": row[2],
+        "subscription_status": row[3],
+        "subscription_end_date": row[4],
+        "created_at": row[5],
+    }
+
+
+def is_subscription_active(status: Optional[str]) -> bool:
+    return (status or "").lower() in SUBSCRIPTION_ACTIVE_STATUSES
+
+
+def to_utc_datetime(unix_seconds: Optional[int]) -> Optional[datetime]:
+    if not unix_seconds:
+        return None
+    try:
+        return datetime.utcfromtimestamp(int(unix_seconds))
+    except Exception:
+        return None
+
+
+def ensure_customers_table():
+    """Create customers table for paid checkout email/audit records."""
+    create_sql = """
+    IF NOT EXISTS (
+        SELECT * FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'customers'
+    )
+    BEGIN
+        CREATE TABLE dbo.customers (
+            id INT IDENTITY(1,1) PRIMARY KEY,
+            email VARCHAR(255) NOT NULL,
+            address_searched VARCHAR(500) NULL,
+            amount_paid DECIMAL(10,2) NULL,
+            stripe_session_id VARCHAR(255) NULL,
+            created_at DATETIME2 DEFAULT SYSUTCDATETIME()
+        )
+    END
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(create_sql)
+        conn.commit()
+        cursor.close()
+
+
+def save_customer_purchase(email: str, address: str, amount_paid: float, stripe_session_id: str):
+    ensure_customers_table()
+    sql = """
+    INSERT INTO dbo.customers (email, address_searched, amount_paid, stripe_session_id)
+    VALUES (?, ?, ?, ?)
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, (email, address, amount_paid, stripe_session_id))
+        conn.commit()
+        cursor.close()
+
+
+def send_permit_email(to_email: str, pdf_bytes: bytes, address: str, session_id: str, amount_paid: float) -> bool:
+    """Send permit certificate by email with PDF attachment."""
+    if not SENDGRID_API_KEY:
+        logging.warning("SENDGRID_API_KEY not configured; skipping certificate email for %s", to_email)
+        if ENVIRONMENT == "production":
+            logging.error("Production environment missing SENDGRID_API_KEY")
+        return False
+
+    try:
+        import sendgrid
+        from sendgrid.helpers.mail import Attachment, FileContent, FileName, FileType, Mail
+
+        sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
+
+        message = Mail(
+            from_email=SENDGRID_FROM_EMAIL,
+            to_emails=to_email,
+            subject=f"Your Permit Certificate - {address or 'Florida Property'}",
+            html_content=f"""
+            <h2>Your Permit Certificate is Ready</h2>
+            <p>Thank you for using PermitVista.</p>
+            <p><strong>Property:</strong> {address or 'N/A'}</p>
+            <p><strong>Amount Paid:</strong> ${amount_paid:.2f}</p>
+            <p><strong>Receipt ID:</strong> {session_id}</p>
+            <p>Your permit certificate PDF is attached to this email.</p>
+            <hr>
+            <p><small>Session: {session_id}</small></p>
+            <p><small>PermitVista - Instant Permit History for Florida Properties</small></p>
+            """,
+        )
+
+        encoded_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
+        message.attachment = Attachment(
+            FileContent(encoded_pdf),
+            FileName("permit_certificate.pdf"),
+            FileType("application/pdf"),
+        )
+
+        sg.send(message)
+        logging.info("Sent permit certificate email to %s", to_email)
+        return True
+    except Exception as e:
+        logging.exception("Failed to send permit email to %s: %s", to_email, e)
+        return False
 
 # ----------------- Helpers -----------------
 def _read_csv_bytes_from_blob(container_client, blob_name: str) -> Optional[pd.DataFrame]:
@@ -1820,40 +2038,48 @@ async def generate_pdf_for_record(request: Request):
 
 @app.get("/pricing")
 async def get_pricing():
-    """Return available pricing tiers for frontend display."""
+    """Return pricing configuration used by frontend UI."""
     return JSONResponse({
         "stripe_enabled": STRIPE_ENABLED,
+        "stripe_publishable_key": STRIPE_PUBLISHABLE_KEY,
+        "products": {
+            "permit_certificate": {
+                "name": "Permit Certificate",
+                "amount": PERMIT_CERTIFICATE_PRICE_CENTS,
+                "price": f"${PERMIT_CERTIFICATE_PRICE_CENTS / 100:.2f}",
+                "type": "one-time",
+            },
+            "permitvista_unlimited": {
+                "name": "PermitVista Unlimited",
+                "amount": UNLIMITED_SUBSCRIPTION_PRICE_CENTS,
+                "price": f"${UNLIMITED_SUBSCRIPTION_PRICE_CENTS / 100:.2f}/month",
+                "type": "subscription",
+            },
+        },
         "tiers": get_pricing_tiers(),
     })
 
 
 @app.post("/create-checkout-session")
 async def create_checkout(request: Request):
-    """
-    Create a Stripe Checkout session.
-    Frontend sends: { record_data, pricing_tier, unit_number }
-    Returns: { checkout_url } for redirect.
-    """
+    """Create one-time Stripe Checkout session for permit certificate ($2.99)."""
     if not STRIPE_ENABLED:
         raise HTTPException(status_code=503, detail="Payment system not configured")
 
     try:
         data = await request.json()
         record_data = data.get("record_data")
-        pricing_tier = data.get("pricing_tier", "standard")
         unit_number = (data.get("unit_number") or "").strip()
+        address = (data.get("address") or "").strip()
 
         if not record_data:
             raise HTTPException(status_code=400, detail="record_data is required")
 
-        if pricing_tier not in PRICING_TIERS:
-            raise HTTPException(status_code=400, detail=f"Invalid pricing_tier. Valid: {list(PRICING_TIERS.keys())}")
-
         result = create_checkout_session(
             record_data=record_data,
-            pricing_tier=pricing_tier,
+            address=address,
             unit_number=unit_number,
-            success_base_url=f"{BACKEND_URL}/payment-success",
+            success_base_url=f"{BACKEND_URL}/success",
             cancel_url=f"{FRONTEND_URL}/?payment=cancelled",
         )
 
@@ -1866,12 +2092,10 @@ async def create_checkout(request: Request):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.get("/success")
 @app.get("/payment-success")
 async def payment_success(session_id: str = Query(...)):
-    """
-    Stripe redirects here after successful payment.
-    Verifies payment, generates PDF, redirects to PDF viewer.
-    """
+    """Stripe return URL for one-time payment success and PDF download."""
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id required")
 
@@ -1898,18 +2122,52 @@ async def payment_success(session_id: str = Query(...)):
     if unit_number:
         record["_unit_number"] = unit_number
 
+    customer_email = ""
+    session_amount_paid = PERMIT_CERTIFICATE_PRICE_CENTS / 100
+    try:
+        stripe_session = stripe_module.checkout.Session.retrieve(session_id)
+        customer_details = stripe_session.get("customer_details") or {}
+        customer_email = (customer_details.get("email") or "").strip().lower()
+        if stripe_session.get("amount_total") is not None:
+            session_amount_paid = float(stripe_session.get("amount_total")) / 100
+    except Exception as e:
+        logging.warning("Could not retrieve checkout email/amount for session %s: %s", session_id, e)
+
+    address = (
+        str(record.get("address") or "").strip()
+        or str(record.get("PermitAddress") or "").strip()
+        or str(record.get("OriginalAddress1") or "").strip()
+        or str(record.get("SearchAddress") or "").strip()
+    )
+
     try:
         pdf_path = generate_pdf_from_template(record, str(TEMPLATES_DIR / "certificate-placeholder.html"))
+        pdf_bytes = b""
+        try:
+            with open(pdf_path, "rb") as f:
+                pdf_bytes = f.read()
+        except Exception as e:
+            logging.warning("Could not read generated PDF bytes for session %s: %s", session_id, e)
+
+        if customer_email and pdf_bytes:
+            send_permit_email(customer_email, pdf_bytes, address, session_id, session_amount_paid)
+
+        if customer_email:
+            try:
+                save_customer_purchase(customer_email, address, session_amount_paid, session_id)
+            except Exception as e:
+                logging.exception("Failed to save customer purchase session=%s email=%s: %s", session_id, customer_email, e)
+
         rec_id = pick_id_from_record(record)
         token = create_token_for_permit(rec_id)
-        view_url = f"{BACKEND_URL}/view/{token}"
+        download_url = f"{BACKEND_URL}/download/{token}.pdf"
 
         logging.info("Payment success: PDF generated for session=%s, permit=%s", session_id, rec_id)
 
         from fastapi.responses import HTMLResponse
         return HTMLResponse(content=f"""
         <html>
-        <head><meta http-equiv="refresh" content="2;url={view_url}">
+        <head><meta http-equiv="refresh" content="2;url={download_url}">
         <style>
             body {{ font-family: 'Inter', sans-serif; text-align: center; padding: 60px; background: #f5f7fa; }}
             .card {{ background: #fff; max-width: 480px; margin: 0 auto; padding: 40px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }}
@@ -1924,8 +2182,9 @@ async def payment_success(session_id: str = Query(...)):
             <div class="card">
                 <h2>Payment Successful!</h2>
                 <div class="spinner"></div>
-                <p>Your permit certificate is ready. Redirecting...</p>
-                <p><a href="{view_url}">Click here if not redirected</a></p>
+                <p>Your permit certificate is ready. Downloading now...</p>
+                <p>{'A confirmation email with your PDF was sent to ' + customer_email if customer_email else 'Email receipt unavailable for this payment session.'}</p>
+                <p><a href="{download_url}">Click here if not redirected</a></p>
             </div>
         </body>
         </html>
@@ -1947,6 +2206,155 @@ async def payment_success(session_id: str = Query(...)):
         )
 
 
+@app.post("/create-subscription")
+async def create_subscription(request: Request):
+    """Create Stripe Checkout session for monthly subscription ($29.99/mo)."""
+    if not STRIPE_ENABLED:
+        raise HTTPException(status_code=503, detail="Payment system not configured")
+
+    data = await request.json()
+    email = (data.get("email") or "").strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email is required")
+
+    try:
+        session = stripe_module.checkout.Session.create(
+            payment_method_types=["card"],
+            mode="subscription",
+            customer_email=email,
+            metadata={"email": email},
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": "usd",
+                        "product_data": {"name": "PermitVista Unlimited"},
+                        "unit_amount": UNLIMITED_SUBSCRIPTION_PRICE_CENTS,
+                        "recurring": {"interval": "month"},
+                    },
+                    "quantity": 1,
+                }
+            ],
+            success_url=f"{BACKEND_URL}/subscription-success?session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{FRONTEND_URL}/?subscription=cancelled",
+        )
+    except stripe_module.error.StripeError as e:
+        logging.exception("Stripe error creating subscription session: %s", e)
+        raise HTTPException(status_code=500, detail=f"Subscription payment error: {str(e)}")
+
+    return JSONResponse({"checkout_url": session.url})
+
+
+@app.get("/subscription-success")
+async def subscription_success(session_id: str = Query(...)):
+    """Persist subscription user status and return user to frontend."""
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+
+    try:
+        session = stripe_module.checkout.Session.retrieve(session_id)
+    except stripe_module.error.StripeError as e:
+        logging.exception("Could not retrieve subscription session %s: %s", session_id, e)
+        raise HTTPException(status_code=400, detail="Invalid subscription session")
+
+    email = ""
+    if session.get("customer_details") and session["customer_details"].get("email"):
+        email = (session["customer_details"]["email"] or "").lower().strip()
+    if not email:
+        email = (session.get("metadata", {}).get("email") or "").lower().strip()
+
+    customer_id = session.get("customer")
+
+    if email:
+        try:
+            upsert_user_subscription(
+                email=email,
+                stripe_customer_id=customer_id,
+                subscription_status="active",
+                subscription_end_date=None,
+            )
+        except Exception as e:
+            logging.exception("Failed to persist subscription success for %s: %s", email, e)
+
+    redirect_url = f"{FRONTEND_URL}/?subscription=success"
+    if email:
+        redirect_url += f"&email={quote_plus(email)}"
+
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(
+        content=f"""
+        <html><head><meta http-equiv="refresh" content="2;url={redirect_url}"></head>
+        <body style="font-family:Inter,sans-serif;text-align:center;padding:60px;">
+          <h2 style="color:#059669;">Subscription Active</h2>
+          <p>Your PermitVista Unlimited membership is now active.</p>
+          <p><a href="{redirect_url}">Continue to PermitVista</a></p>
+        </body></html>
+        """
+    )
+
+
+@app.get("/subscription-status")
+async def subscription_status(email: str = Query(...)):
+    """Lookup subscription status by user email."""
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email is required")
+
+    try:
+        user = get_user_by_email(email.strip().lower())
+    except Exception as e:
+        logging.exception("Subscription lookup failed for %s: %s", email, e)
+        raise HTTPException(status_code=500, detail="Subscription lookup failed")
+
+    if not user:
+        return JSONResponse(
+            {
+                "email": email,
+                "is_subscribed": False,
+                "subscription_status": "none",
+                "subscription_end_date": None,
+                "can_manage_subscription": False,
+            }
+        )
+
+    status = user.get("subscription_status") or "none"
+    return JSONResponse(
+        {
+            "email": user.get("email"),
+            "is_subscribed": is_subscription_active(status),
+            "subscription_status": status,
+            "subscription_end_date": str(user.get("subscription_end_date") or ""),
+            "can_manage_subscription": bool(user.get("stripe_customer_id")),
+        }
+    )
+
+
+@app.post("/create-customer-portal-session")
+async def create_customer_portal_session(request: Request):
+    """Create Stripe customer portal session for active subscribers."""
+    if not STRIPE_ENABLED:
+        raise HTTPException(status_code=503, detail="Payment system not configured")
+
+    data = await request.json()
+    email = (data.get("email") or "").strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email is required")
+
+    user = get_user_by_email(email)
+    if not user or not user.get("stripe_customer_id"):
+        raise HTTPException(status_code=404, detail="No Stripe customer found for this email")
+
+    try:
+        portal = stripe_module.billing_portal.Session.create(
+            customer=user["stripe_customer_id"],
+            return_url=FRONTEND_URL,
+        )
+    except stripe_module.error.StripeError as e:
+        logging.exception("Stripe customer portal session failed for %s: %s", email, e)
+        raise HTTPException(status_code=500, detail=f"Portal error: {str(e)}")
+
+    return JSONResponse({"portal_url": portal.url})
+
+
+@app.post("/webhook")
 @app.post("/stripe-webhook")
 async def stripe_webhook(request: Request):
     """
@@ -1968,10 +2376,57 @@ async def stripe_webhook(request: Request):
     except stripe_module.error.SignatureVerificationError:
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    if event["type"] == "checkout.session.completed":
+    event_type = event.get("type")
+
+    if event_type == "checkout.session.completed":
         session = event["data"]["object"]
-        logging.info("Webhook: checkout.session.completed for %s (payment=%s)",
-                     session["id"], session.get("payment_status"))
+        mode = session.get("mode")
+        logging.info(
+            "Webhook: checkout.session.completed for %s (mode=%s, payment=%s)",
+            session.get("id"),
+            mode,
+            session.get("payment_status"),
+        )
+        if mode == "subscription":
+            email = ""
+            customer_details = session.get("customer_details") or {}
+            if customer_details.get("email"):
+                email = customer_details.get("email").lower().strip()
+            if not email:
+                email = (session.get("metadata", {}).get("email") or "").lower().strip()
+            customer_id = session.get("customer")
+            if email:
+                try:
+                    upsert_user_subscription(
+                        email=email,
+                        stripe_customer_id=customer_id,
+                        subscription_status="active",
+                        subscription_end_date=None,
+                    )
+                except Exception as e:
+                    logging.exception("Failed to upsert subscription user from checkout event: %s", e)
+
+    elif event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
+        subscription = event["data"]["object"]
+        customer_id = subscription.get("customer")
+        subscription_status = subscription.get("status") or "canceled"
+        subscription_end_date = to_utc_datetime(subscription.get("current_period_end"))
+        if customer_id:
+            try:
+                updated = update_user_subscription_by_customer(
+                    stripe_customer_id=customer_id,
+                    subscription_status=subscription_status,
+                    subscription_end_date=subscription_end_date,
+                )
+                logging.info(
+                    "Webhook: %s customer=%s status=%s updated_rows=%s",
+                    event_type,
+                    customer_id,
+                    subscription_status,
+                    updated,
+                )
+            except Exception as e:
+                logging.exception("Failed to update subscription lifecycle from webhook: %s", e)
 
     return JSONResponse({"status": "ok"})
 
