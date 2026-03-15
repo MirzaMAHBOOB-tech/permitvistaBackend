@@ -236,14 +236,17 @@ def _init_connection_pool():
                 _db_pool = Queue(maxsize=DB_POOL_SIZE)
                 logging.info("Initialized database connection pool (size=%d)", DB_POOL_SIZE)
 
-def _create_new_connection():
-    """Create a new database connection with retry logic"""
+def _create_new_connection(max_retries: Optional[int] = None, retry_delay: Optional[float] = None):
+    """Create a new database connection with retry logic."""
     global _db_connection_string
-    if not _db_connection_string:
+    if _db_connection_string is None:
         _db_connection_string = _build_connection_string()
+
+    retries = max(1, int(max_retries if max_retries is not None else DB_MAX_RETRIES))
+    base_delay = float(retry_delay if retry_delay is not None else DB_RETRY_DELAY)
     
     last_error = None
-    for attempt in range(DB_MAX_RETRIES):
+    for attempt in range(retries):
         try:
             conn = pyodbc.connect(_db_connection_string, timeout=DB_CONNECTION_TIMEOUT)
             # Test the connection
@@ -253,13 +256,13 @@ def _create_new_connection():
             return conn
         except pyodbc.Error as e:
             last_error = e
-            if attempt < DB_MAX_RETRIES - 1:
-                delay = DB_RETRY_DELAY * (2 ** attempt)  # Exponential backoff
+            if attempt < retries - 1:
+                delay = base_delay * (2 ** attempt)  # Exponential backoff
                 logging.warning("Connection attempt %d/%d failed: %s. Retrying in %.1fs...", 
-                              attempt + 1, DB_MAX_RETRIES, str(e), delay)
+                              attempt + 1, retries, str(e), delay)
                 time.sleep(delay)
             else:
-                logging.error("All %d connection attempts failed. Last error: %s", DB_MAX_RETRIES, e)
+                logging.error("All %d connection attempts failed. Last error: %s", retries, e)
     
     raise last_error
 
@@ -288,7 +291,7 @@ def _warm_up_connection(conn):
 
 
 @contextmanager
-def get_db_connection():
+def get_db_connection(fast_fail: bool = False):
     """
     Get a database connection from the pool (context manager).
     Returns connection and ensures it's returned to pool or closed on error.
@@ -312,7 +315,10 @@ def get_db_connection():
         
         # If no connection from pool, create new one
         if conn is None:
-            conn = _create_new_connection()
+            if fast_fail:
+                conn = _create_new_connection(max_retries=1, retry_delay=0)
+            else:
+                conn = _create_new_connection()
             # Warm up connection to avoid cold start delay
             _warm_up_connection(conn)
         
@@ -440,14 +446,15 @@ def update_user_subscription_by_customer(
     return affected
 
 
-def get_user_by_email(email: str) -> Optional[dict]:
-    ensure_users_table()
+def get_user_by_email(email: str, fast_fail: bool = False) -> Optional[dict]:
+    if not fast_fail:
+        ensure_users_table()
     sql = """
     SELECT TOP 1 id, email, stripe_customer_id, subscription_status, subscription_end_date, created_at
     FROM dbo.users
     WHERE LOWER(email) = LOWER(?)
     """
-    with get_db_connection() as conn:
+    with get_db_connection(fast_fail=fast_fail) as conn:
         cursor = conn.cursor()
         cursor.execute(sql, (email,))
         row = cursor.fetchone()
@@ -517,19 +524,20 @@ def save_customer_purchase(email: str, address: str, amount_paid: float, stripe_
         cursor.close()
 
 
-def has_customer_purchase(email: str) -> bool:
+def has_customer_purchase(email: str, fast_fail: bool = False) -> bool:
     """Return True if email has at least one successful paid checkout record."""
     if not email:
         return False
 
-    ensure_customers_table()
+    if not fast_fail:
+        ensure_customers_table()
     sql = """
     SELECT TOP 1 id
     FROM dbo.customers
     WHERE LOWER(email) = LOWER(?)
     ORDER BY created_at DESC
     """
-    with get_db_connection() as conn:
+    with get_db_connection(fast_fail=fast_fail) as conn:
         cursor = conn.cursor()
         cursor.execute(sql, (email,))
         row = cursor.fetchone()
@@ -2343,7 +2351,7 @@ async def subscription_status(email: str = Query(...)):
     user_lookup_error: Optional[Exception] = None
 
     try:
-        user = get_user_by_email(normalized_email)
+        user = get_user_by_email(normalized_email, fast_fail=True)
     except Exception as e:
         user_lookup_ok = False
         lookup_degraded = True
@@ -2355,7 +2363,7 @@ async def subscription_status(email: str = Query(...)):
         purchase_lookup_ok = False
     else:
         try:
-            has_purchase = has_customer_purchase(normalized_email)
+            has_purchase = has_customer_purchase(normalized_email, fast_fail=True)
         except Exception as e:
             purchase_lookup_ok = False
             lookup_degraded = True
