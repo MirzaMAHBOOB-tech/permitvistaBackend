@@ -522,23 +522,25 @@ def has_customer_purchase(email: str) -> bool:
     if not email:
         return False
 
-    try:
-        ensure_customers_table()
-        sql = """
-        SELECT TOP 1 id
-        FROM dbo.customers
-        WHERE LOWER(email) = LOWER(?)
-        ORDER BY created_at DESC
-        """
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(sql, (email,))
-            row = cursor.fetchone()
-            cursor.close()
-        return bool(row)
-    except Exception as e:
-        logging.warning("Customer purchase lookup failed for %s: %s", email, e)
-        return False
+    ensure_customers_table()
+    sql = """
+    SELECT TOP 1 id
+    FROM dbo.customers
+    WHERE LOWER(email) = LOWER(?)
+    ORDER BY created_at DESC
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, (email,))
+        row = cursor.fetchone()
+        cursor.close()
+    return bool(row)
+
+
+def is_temporary_db_unavailable_error(err: Exception) -> bool:
+    """Detect transient SQL availability issues where retries should stop early."""
+    msg = str(err or "").lower()
+    return "40925" in msg or "can not connect to the database in its current state" in msg
 
 
 def send_permit_email(to_email: str, pdf_bytes: bytes, address: str, session_id: str, amount_paid: float) -> bool:
@@ -2336,19 +2338,28 @@ async def subscription_status(email: str = Query(...)):
     user = None
     user_lookup_ok = True
     purchase_lookup_ok = True
+    lookup_degraded = False
     has_purchase = False
+    user_lookup_error: Optional[Exception] = None
 
     try:
         user = get_user_by_email(normalized_email)
     except Exception as e:
         user_lookup_ok = False
+        lookup_degraded = True
+        user_lookup_error = e
         logging.exception("Subscription user lookup failed for %s: %s", normalized_email, e)
 
-    try:
-        has_purchase = has_customer_purchase(normalized_email)
-    except Exception as e:
+    # If DB is temporarily unavailable, skip second DB probe to reduce response delay.
+    if (not user_lookup_ok) and user_lookup_error and is_temporary_db_unavailable_error(user_lookup_error):
         purchase_lookup_ok = False
-        logging.exception("Subscription purchase lookup failed for %s: %s", normalized_email, e)
+    else:
+        try:
+            has_purchase = has_customer_purchase(normalized_email)
+        except Exception as e:
+            purchase_lookup_ok = False
+            lookup_degraded = True
+            logging.exception("Subscription purchase lookup failed for %s: %s", normalized_email, e)
 
     user_status = (user or {}).get("subscription_status") or "none"
     is_active_subscription = is_subscription_active(user_status)
@@ -2363,6 +2374,10 @@ async def subscription_status(email: str = Query(...)):
                 purchase_lookup_ok,
             )
 
+        status_message = "No active membership found for this email."
+        if lookup_degraded:
+            status_message = "Status check is temporarily unavailable. Please try again shortly."
+
         return JSONResponse(
             {
                 "email": normalized_email,
@@ -2370,8 +2385,17 @@ async def subscription_status(email: str = Query(...)):
                 "subscription_status": "none",
                 "subscription_end_date": None,
                 "can_manage_subscription": False,
+                "lookup_degraded": lookup_degraded,
+                "status_message": status_message,
             }
         )
+
+    if has_purchase:
+        status_message = "Payment found. You have full access to all permit downloads."
+    elif is_active_subscription:
+        status_message = "Subscription is active. You have unlimited permit downloads."
+    else:
+        status_message = "No active membership found for this email."
 
     return JSONResponse(
         {
@@ -2380,6 +2404,8 @@ async def subscription_status(email: str = Query(...)):
             "subscription_status": user_status,
             "subscription_end_date": str((user or {}).get("subscription_end_date") or ""),
             "can_manage_subscription": bool((user or {}).get("stripe_customer_id")),
+            "lookup_degraded": lookup_degraded,
+            "status_message": status_message,
         }
     )
 
