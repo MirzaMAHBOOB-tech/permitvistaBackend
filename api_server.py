@@ -2094,6 +2094,26 @@ async def get_pricing():
     })
 
 
+@app.get("/stripe-webhook-diagnostics")
+async def stripe_webhook_diagnostics():
+    """Return non-sensitive webhook wiring diagnostics for environment verification."""
+    return JSONResponse(
+        {
+            "stripe_enabled": STRIPE_ENABLED,
+            "webhook_secret_configured": bool(STRIPE_WEBHOOK_SECRET),
+            "webhook_secret_length": len(STRIPE_WEBHOOK_SECRET or ""),
+            "webhook_routes": ["/webhook", "/stripe-webhook"],
+            "required_events": [
+                "checkout.session.completed",
+                "customer.subscription.created",
+                "customer.subscription.updated",
+                "customer.subscription.deleted",
+            ],
+            "notes": "Set STRIPE_WEBHOOK_SECRET on Render and configure Stripe Dashboard endpoint to POST /webhook.",
+        }
+    )
+
+
 @app.post("/create-checkout-session")
 async def create_checkout(request: Request):
     """Create one-time Stripe Checkout session for permit certificate ($2.99)."""
