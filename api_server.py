@@ -353,7 +353,7 @@ def get_table_name(city: Optional[str]) -> List[str]:
 
 
 # ----------------- Subscription/User helpers -----------------
-SUBSCRIPTION_ACTIVE_STATUSES = {"active", "trialing"}
+SUBSCRIPTION_ACTIVE_STATUSES = {"active", "trialing", "paid"}
 
 
 def ensure_users_table():
@@ -515,6 +515,30 @@ def save_customer_purchase(email: str, address: str, amount_paid: float, stripe_
         cursor.execute(sql, (email, address, amount_paid, stripe_session_id))
         conn.commit()
         cursor.close()
+
+
+def has_customer_purchase(email: str) -> bool:
+    """Return True if email has at least one successful paid checkout record."""
+    if not email:
+        return False
+
+    try:
+        ensure_customers_table()
+        sql = """
+        SELECT TOP 1 id
+        FROM dbo.customers
+        WHERE LOWER(email) = LOWER(?)
+        ORDER BY created_at DESC
+        """
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(sql, (email,))
+            row = cursor.fetchone()
+            cursor.close()
+        return bool(row)
+    except Exception as e:
+        logging.warning("Customer purchase lookup failed for %s: %s", email, e)
+        return False
 
 
 def send_permit_email(to_email: str, pdf_bytes: bytes, address: str, session_id: str, amount_paid: float) -> bool:
@@ -2158,6 +2182,15 @@ async def payment_success(session_id: str = Query(...)):
             except Exception as e:
                 logging.exception("Failed to save customer purchase session=%s email=%s: %s", session_id, customer_email, e)
 
+            # Grant full access after successful one-time payment.
+            try:
+                upsert_user_subscription(
+                    email=customer_email,
+                    subscription_status="paid",
+                )
+            except Exception as e:
+                logging.warning("Could not persist paid entitlement for %s: %s", customer_email, e)
+
         rec_id = pick_id_from_record(record)
         token = create_token_for_permit(rec_id)
         download_url = f"{BACKEND_URL}/download/{token}.pdf"
@@ -2298,16 +2331,41 @@ async def subscription_status(email: str = Query(...)):
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="Valid email is required")
 
-    try:
-        user = get_user_by_email(email.strip().lower())
-    except Exception as e:
-        logging.exception("Subscription lookup failed for %s: %s", email, e)
-        raise HTTPException(status_code=500, detail="Subscription lookup failed")
+    normalized_email = email.strip().lower()
 
-    if not user:
+    user = None
+    user_lookup_ok = True
+    purchase_lookup_ok = True
+    has_purchase = False
+
+    try:
+        user = get_user_by_email(normalized_email)
+    except Exception as e:
+        user_lookup_ok = False
+        logging.exception("Subscription user lookup failed for %s: %s", normalized_email, e)
+
+    try:
+        has_purchase = has_customer_purchase(normalized_email)
+    except Exception as e:
+        purchase_lookup_ok = False
+        logging.exception("Subscription purchase lookup failed for %s: %s", normalized_email, e)
+
+    user_status = (user or {}).get("subscription_status") or "none"
+    is_active_subscription = is_subscription_active(user_status)
+    is_subscribed = bool(is_active_subscription or has_purchase)
+
+    if not user and not has_purchase:
+        if not user_lookup_ok or not purchase_lookup_ok:
+            logging.warning(
+                "Returning safe fallback for subscription-status email=%s (user_ok=%s purchase_ok=%s)",
+                normalized_email,
+                user_lookup_ok,
+                purchase_lookup_ok,
+            )
+
         return JSONResponse(
             {
-                "email": email,
+                "email": normalized_email,
                 "is_subscribed": False,
                 "subscription_status": "none",
                 "subscription_end_date": None,
@@ -2315,14 +2373,13 @@ async def subscription_status(email: str = Query(...)):
             }
         )
 
-    status = user.get("subscription_status") or "none"
     return JSONResponse(
         {
-            "email": user.get("email"),
-            "is_subscribed": is_subscription_active(status),
-            "subscription_status": status,
-            "subscription_end_date": str(user.get("subscription_end_date") or ""),
-            "can_manage_subscription": bool(user.get("stripe_customer_id")),
+            "email": (user or {}).get("email") or normalized_email,
+            "is_subscribed": is_subscribed,
+            "subscription_status": user_status,
+            "subscription_end_date": str((user or {}).get("subscription_end_date") or ""),
+            "can_manage_subscription": bool((user or {}).get("stripe_customer_id")),
         }
     )
 
