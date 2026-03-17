@@ -359,7 +359,7 @@ def get_table_name(city: Optional[str]) -> List[str]:
 
 
 # ----------------- Subscription/User helpers -----------------
-SUBSCRIPTION_ACTIVE_STATUSES = {"active", "trialing", "paid"}
+SUBSCRIPTION_ACTIVE_STATUSES = {"active", "trialing"}
 
 
 def ensure_users_table():
@@ -2217,15 +2217,6 @@ async def payment_success(session_id: str = Query(...)):
             except Exception as e:
                 logging.exception("Failed to save customer purchase session=%s email=%s: %s", session_id, customer_email, e)
 
-            # Grant full access after successful one-time payment.
-            try:
-                upsert_user_subscription(
-                    email=customer_email,
-                    subscription_status="paid",
-                )
-            except Exception as e:
-                logging.warning("Could not persist paid entitlement for %s: %s", customer_email, e)
-
         rec_id = pick_id_from_record(record)
         token = create_token_for_permit(rec_id)
         download_url = f"{BACKEND_URL}/download/{token}.pdf"
@@ -2255,7 +2246,7 @@ async def payment_success(session_id: str = Query(...)):
             <div class="card">
                 <h2>Payment Successful!</h2>
                 <div class="spinner"></div>
-                <p>Your payment has been verified. You now have full access to all permit downloads.</p>
+                <p>Your payment has been verified for this permit certificate.</p>
                 <p>{'A confirmation email with your PDF was sent to ' + customer_email if customer_email else 'Email receipt unavailable for this payment session.'}</p>
                 <p><a href="{redirect_url}">Click here if not redirected</a></p>
             </div>
@@ -2401,7 +2392,7 @@ async def subscription_status(email: str = Query(...)):
 
     user_status = (user or {}).get("subscription_status") or "none"
     is_active_subscription = is_subscription_active(user_status)
-    is_subscribed = bool(is_active_subscription or has_purchase)
+    is_subscribed = bool(is_active_subscription)
 
     if not user and not has_purchase:
         if not user_lookup_ok or not purchase_lookup_ok:
@@ -2428,10 +2419,10 @@ async def subscription_status(email: str = Query(...)):
             }
         )
 
-    if has_purchase:
-        status_message = "Payment found. You have full access to all permit downloads."
-    elif is_active_subscription:
+    if is_active_subscription:
         status_message = "Subscription is active. You have unlimited permit downloads."
+    elif has_purchase:
+        status_message = "One-time payment found. Unlimited access requires the $29.99/month subscription."
     else:
         status_message = "No active membership found for this email."
 
@@ -2439,6 +2430,7 @@ async def subscription_status(email: str = Query(...)):
         {
             "email": (user or {}).get("email") or normalized_email,
             "is_subscribed": is_subscribed,
+            "has_one_time_purchase": has_purchase,
             "subscription_status": user_status,
             "subscription_end_date": str((user or {}).get("subscription_end_date") or ""),
             "can_manage_subscription": bool((user or {}).get("stripe_customer_id")),
@@ -2527,12 +2519,7 @@ async def stripe_webhook(request: Request):
                     
                     # Save customer purchase record
                     save_customer_purchase(email, address, amount_paid, session.get("id"))
-                    
-                    # Grant "paid" status to user
-                    upsert_user_subscription(
-                        email=email,
-                        subscription_status="paid",
-                    )
+
                     logging.info("Webhook: One-time payment confirmed for %s, session=%s, amount=$%.2f", email, session.get("id"), amount_paid)
                 except Exception as e:
                     logging.exception("Failed to process one-time payment from webhook for %s: %s", email, e)
