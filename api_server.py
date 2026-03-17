@@ -2219,14 +2219,20 @@ async def payment_success(session_id: str = Query(...)):
 
         rec_id = pick_id_from_record(record)
         token = create_token_for_permit(rec_id)
+        view_url = f"{BACKEND_URL}/view/{token}"
         download_url = f"{BACKEND_URL}/download/{token}.pdf"
 
         logging.info("Payment success: PDF generated for session=%s, permit=%s, email=%s", session_id, rec_id, customer_email)
 
-        # Determine redirect URL - include email and payment success flag
-        redirect_url = download_url
+        # Redirect to frontend with payment success context and generated PDF URLs.
+        redirect_params = [
+            "payment=success",
+            f"view_url={quote_plus(view_url)}",
+            f"download_url={quote_plus(download_url)}",
+        ]
         if customer_email:
-            redirect_url = f"{FRONTEND_URL}/?payment=success&email={customer_email}"
+            redirect_params.append(f"email={quote_plus(customer_email)}")
+        redirect_url = f"{FRONTEND_URL}/?{'&'.join(redirect_params)}"
 
         from fastapi.responses import HTMLResponse
         return HTMLResponse(content=f"""
