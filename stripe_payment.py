@@ -83,8 +83,9 @@ def create_checkout_session(
     record_data: dict,
     address: str,
     unit_number: str,
-    success_base_url: str,
-    cancel_url: str,
+    email: str = "",
+    success_base_url: str = "",
+    cancel_url: str = "",
 ) -> dict:
     """
     Create a Stripe Checkout session.
@@ -95,9 +96,9 @@ def create_checkout_session(
         ValueError for invalid tier
         stripe.error.StripeError for Stripe API issues
     """
-    session = stripe.checkout.Session.create(
-        payment_method_types=["card"],
-        line_items=[{
+    session_kwargs = {
+        "payment_method_types": ["card"],
+        "line_items": [{
             "price_data": {
                 "currency": "usd",
                 "product_data": {
@@ -108,13 +109,23 @@ def create_checkout_session(
             },
             "quantity": 1,
         }],
-        mode="payment",
-        success_url=f"{success_base_url}?session_id={{CHECKOUT_SESSION_ID}}",
-        cancel_url=cancel_url,
-    )
+        "mode": "payment",
+        "success_url": f"{success_base_url}?session_id={{CHECKOUT_SESSION_ID}}" + (f"&email={email}" if email else ""),
+        "cancel_url": cancel_url,
+    }
+
+    # Add email to Stripe session if provided
+    if email:
+        session_kwargs["customer_email"] = email
+        session_kwargs["metadata"] = {
+            "email": email,
+            "address": address,
+        }
+
+    session = stripe.checkout.Session.create(**session_kwargs)
 
     store_pending_session(session.id, record_data, "permit_certificate", unit_number)
-    logging.info("Created Stripe one-time checkout session %s", session.id)
+    logging.info("Created Stripe one-time checkout session %s for email=%s", session.id, email or "unknown")
 
     return {
         "checkout_url": session.url,

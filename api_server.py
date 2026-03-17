@@ -2125,6 +2125,7 @@ async def create_checkout(request: Request):
         record_data = data.get("record_data")
         unit_number = (data.get("unit_number") or "").strip()
         address = (data.get("address") or "").strip()
+        email = (data.get("email") or "").strip().lower()
 
         if not record_data:
             raise HTTPException(status_code=400, detail="record_data is required")
@@ -2133,6 +2134,7 @@ async def create_checkout(request: Request):
             record_data=record_data,
             address=address,
             unit_number=unit_number,
+            email=email,
             success_base_url=f"{BACKEND_URL}/success",
             cancel_url=f"{FRONTEND_URL}/?payment=cancelled",
         )
@@ -2182,6 +2184,9 @@ async def payment_success(session_id: str = Query(...)):
         stripe_session = stripe_module.checkout.Session.retrieve(session_id)
         customer_details = stripe_session.get("customer_details") or {}
         customer_email = (customer_details.get("email") or "").strip().lower()
+        if not customer_email:
+            # Try metadata first
+            customer_email = (stripe_session.get("metadata", {}).get("email") or "").strip().lower()
         if stripe_session.get("amount_total") is not None:
             session_amount_paid = float(stripe_session.get("amount_total")) / 100
     except Exception as e:
@@ -2225,12 +2230,17 @@ async def payment_success(session_id: str = Query(...)):
         token = create_token_for_permit(rec_id)
         download_url = f"{BACKEND_URL}/download/{token}.pdf"
 
-        logging.info("Payment success: PDF generated for session=%s, permit=%s", session_id, rec_id)
+        logging.info("Payment success: PDF generated for session=%s, permit=%s, email=%s", session_id, rec_id, customer_email)
+
+        # Determine redirect URL - include email and payment success flag
+        redirect_url = download_url
+        if customer_email:
+            redirect_url = f"{FRONTEND_URL}/?payment=success&email={customer_email}"
 
         from fastapi.responses import HTMLResponse
         return HTMLResponse(content=f"""
         <html>
-        <head><meta http-equiv="refresh" content="2;url={download_url}">
+        <head><meta http-equiv="refresh" content="2;url={redirect_url}">
         <style>
             body {{ font-family: 'Inter', sans-serif; text-align: center; padding: 60px; background: #f5f7fa; }}
             .card {{ background: #fff; max-width: 480px; margin: 0 auto; padding: 40px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }}
@@ -2245,9 +2255,9 @@ async def payment_success(session_id: str = Query(...)):
             <div class="card">
                 <h2>Payment Successful!</h2>
                 <div class="spinner"></div>
-                <p>Your permit certificate is ready. Downloading now...</p>
+                <p>Your payment has been verified. You now have full access to all permit downloads.</p>
                 <p>{'A confirmation email with your PDF was sent to ' + customer_email if customer_email else 'Email receipt unavailable for this payment session.'}</p>
-                <p><a href="{download_url}">Click here if not redirected</a></p>
+                <p><a href="{redirect_url}">Click here if not redirected</a></p>
             </div>
         </body>
         </html>
@@ -2492,13 +2502,42 @@ async def stripe_webhook(request: Request):
     if event_type == "checkout.session.completed":
         session = event["data"]["object"]
         mode = session.get("mode")
+        payment_status = session.get("payment_status")
         logging.info(
             "Webhook: checkout.session.completed for %s (mode=%s, payment=%s)",
             session.get("id"),
             mode,
-            session.get("payment_status"),
+            payment_status,
         )
-        if mode == "subscription":
+        
+        if mode == "payment" and payment_status == "paid":
+            # Handle one-time payment completion
+            email = ""
+            customer_details = session.get("customer_details") or {}
+            if customer_details.get("email"):
+                email = customer_details.get("email").lower().strip()
+            if not email:
+                email = (session.get("metadata", {}).get("email") or "").lower().strip()
+            
+            if email:
+                try:
+                    # Get payment amount
+                    amount_paid = (session.get("amount_total") or 0) / 100.0
+                    address = (session.get("metadata", {}).get("address") or "").strip()
+                    
+                    # Save customer purchase record
+                    save_customer_purchase(email, address, amount_paid, session.get("id"))
+                    
+                    # Grant "paid" status to user
+                    upsert_user_subscription(
+                        email=email,
+                        subscription_status="paid",
+                    )
+                    logging.info("Webhook: One-time payment confirmed for %s, session=%s, amount=$%.2f", email, session.get("id"), amount_paid)
+                except Exception as e:
+                    logging.exception("Failed to process one-time payment from webhook for %s: %s", email, e)
+        
+        elif mode == "subscription":
             email = ""
             customer_details = session.get("customer_details") or {}
             if customer_details.get("email"):
