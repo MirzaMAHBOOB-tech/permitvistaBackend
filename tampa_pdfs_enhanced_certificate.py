@@ -17,6 +17,7 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 import time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dotenv import load_dotenv
 from permit_portals import get_permit_portal_url
 import pandas as pd
@@ -44,6 +45,7 @@ USE_WEASYPRINT = os.getenv("USE_WEASYPRINT", "auto").lower()  # 'auto'|'true'|'f
 VERBOSE = os.getenv("VERBOSE", "true").lower() in ("1","true","yes","y")
 MAX_LIST_DISPLAY = int(os.getenv("MAX_LIST_DISPLAY", "6"))
 WRITE_DEBUG_HTML = os.getenv("WRITE_DEBUG_HTML", "true").lower() in ("1","true","yes","y")
+CERTIFICATE_TIMEZONE = os.getenv("CERTIFICATE_TIMEZONE", "America/New_York")
 
 # Paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -65,6 +67,17 @@ def log(msg: str, level: str = "info"):
     if level.lower() == "debug" and not VERBOSE:
         return
     print(f"{prefix} {msg}")
+
+
+def get_certificate_generated_on_date() -> str:
+    try:
+        return datetime.now(ZoneInfo(CERTIFICATE_TIMEZONE)).strftime("%m/%d/%Y")
+    except ZoneInfoNotFoundError:
+        log(
+            f"Invalid CERTIFICATE_TIMEZONE '{CERTIFICATE_TIMEZONE}'; falling back to America/New_York.",
+            "warning",
+        )
+        return datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y")
 
 # ------------------ WeasyPrint detection w/ env control ------------------
 HAVE_WEASYPRINT = False
@@ -238,7 +251,7 @@ def render_enhanced_certificate_pdf_bytes(record: dict, id_col: str, all_fields:
 
     ctx = {
         "certificate_number": generate_certificate_number(),
-        "generated_on_date": datetime.now().strftime("%m/%d/%Y"),
+        "generated_on_date": get_certificate_generated_on_date(),
 
         "property": {
             "address_description": record.get("AddressDescription", "") or record.get("AddressDescription1", "") or record.get("ParcelID", ""),

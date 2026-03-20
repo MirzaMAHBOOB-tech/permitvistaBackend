@@ -26,6 +26,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, date
 from urllib.parse import quote_plus
 import base64
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # ----------------- Database Import -----------------
 import pyodbc
@@ -106,6 +107,19 @@ def clean_address_for_shovels(address: str) -> str:
 # ----------------- Setup / Logging -----------------
 BASE_DIR = Path(__file__).parent
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+CERTIFICATE_TIMEZONE = os.getenv("CERTIFICATE_TIMEZONE", "America/New_York")
+
+
+def get_certificate_generated_on_date() -> str:
+    try:
+        return datetime.now(ZoneInfo(CERTIFICATE_TIMEZONE)).strftime("%m/%d/%Y")
+    except ZoneInfoNotFoundError:
+        logging.warning(
+            "Invalid CERTIFICATE_TIMEZONE '%s'; falling back to America/New_York",
+            CERTIFICATE_TIMEZONE,
+        )
+        return datetime.now(ZoneInfo("America/New_York")).strftime("%m/%d/%Y")
 
 # reduce azure noise (set to ERROR)
 logging.getLogger("azure").setLevel(logging.ERROR)
@@ -3128,7 +3142,7 @@ def generate_pdf_from_template(record: dict, template_path: str) -> str:
             "work_description": get_field_value(record, "Description", "WorkDescription", "Desc1-Desc10", "Work_Description", "WorkType", "ProjectDesc"),
             "logo_image_url": str((BASE_DIR / "Medias" / "badge.png").as_uri()) if (BASE_DIR / "Medias" / "badge.png").exists() else "",
             "map_image_url": _build_map_image_url(record),
-            "generated_on_date": datetime.now().strftime("%m/%d/%Y"),
+            "generated_on_date": get_certificate_generated_on_date(),
             "record": record
         }
         
